@@ -1,5 +1,3 @@
-'use client';
-
 import { useMemo, useState } from 'react';
 
 type NavItem = { label: string; icon: string };
@@ -36,6 +34,14 @@ const transactionActions = [
 ];
 
 export default function Home() {
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
+  const [authError, setAuthError] = useState('');
   const [activeNav, setActiveNav] = useState('Overview');
   const [showNew, setShowNew] = useState(false);
   const [period, setPeriod] = useState('This month');
@@ -57,6 +63,27 @@ export default function Home() {
   function handleNav(label: string) {
     setActiveNav(label);
     if (label !== 'Overview') showToast(`${label} is ready for your next review.`);
+  }
+
+  function handleAuthSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!authEmail.trim() || !authPassword.trim() || (authMode === 'signup' && !authName.trim())) {
+      setAuthError(authMode === 'login' ? 'Enter your email and password to continue.' : 'Add your name, email, and password to create your workspace.');
+      return;
+    }
+    setAuthError('');
+    setIsAuthenticated(true);
+  }
+
+  function useDemoWorkspace() {
+    setAuthEmail('shadma@gcsrvllc.com');
+    setAuthPassword('demo-workspace');
+    setAuthError('');
+    setIsAuthenticated(true);
+  }
+
+  if (!isAuthenticated) {
+    return <AuthScreen authMode={authMode} setAuthMode={(mode) => { setAuthMode(mode); setAuthError(''); }} authEmail={authEmail} setAuthEmail={setAuthEmail} authPassword={authPassword} setAuthPassword={setAuthPassword} authName={authName} setAuthName={setAuthName} showPassword={showPassword} setShowPassword={setShowPassword} rememberMe={rememberMe} setRememberMe={setRememberMe} authError={authError} onSubmit={handleAuthSubmit} onDemo={useDemoWorkspace} />;
   }
 
   return (
@@ -106,7 +133,7 @@ export default function Home() {
           <div className="user-row">
             <span className="user-avatar">SM</span>
             <div><strong>Shadma Mittal</strong><small>Owner · Admin</small></div>
-            <button aria-label="Open profile menu" onClick={() => showToast('Profile menu opened.')}>•••</button>
+            <button aria-label="Sign out" onClick={() => { setIsAuthenticated(false); setAuthPassword(''); }}>↪</button>
           </div>
         </div>
       </aside>
@@ -216,6 +243,75 @@ export default function Home() {
 
       {showNew && <div className="modal-backdrop" role="presentation" onClick={() => setShowNew(false)}><div className="new-modal" role="dialog" aria-modal="true" aria-labelledby="new-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><div className="eyebrow">Quick action</div><h2 id="new-title">What would you like to add?</h2></div><button className="modal-close" aria-label="Close dialog" onClick={() => setShowNew(false)}>×</button></div><div className="action-list">{transactionActions.map((action) => <button key={action.label} className="action-row" onClick={() => { setShowNew(false); showToast(`${action.label} started.`); }}><span className="action-icon">{action.icon}</span><span><strong>{action.label}</strong><small>{action.note}</small></span><span className="action-arrow">↗</span></button>)}</div><div className="modal-note"><span>✦</span> GCS Books keeps your next step simple.</div></div></div>}
       {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
+    </main>
+  );
+}
+
+function AuthScreen({
+  authMode,
+  setAuthMode,
+  authEmail,
+  setAuthEmail,
+  authPassword,
+  setAuthPassword,
+  authName,
+  setAuthName,
+  showPassword,
+  setShowPassword,
+  rememberMe,
+  setRememberMe,
+  authError,
+  onSubmit,
+  onDemo,
+}: {
+  authMode: 'login' | 'signup';
+  setAuthMode: (mode: 'login' | 'signup') => void;
+  authEmail: string;
+  setAuthEmail: (value: string) => void;
+  authPassword: string;
+  setAuthPassword: (value: string) => void;
+  authName: string;
+  setAuthName: (value: string) => void;
+  showPassword: boolean;
+  setShowPassword: (value: boolean) => void;
+  rememberMe: boolean;
+  setRememberMe: (value: boolean) => void;
+  authError: string;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+  onDemo: () => void;
+}) {
+  const isSignup = authMode === 'signup';
+
+  return (
+    <main className="auth-shell">
+      <div className="auth-glow auth-glow-one" aria-hidden="true" />
+      <div className="auth-glow auth-glow-two" aria-hidden="true" />
+      <section className="auth-story">
+        <div className="auth-brand-lockup"><div className="brand-mark" aria-hidden="true"><span>G</span></div><div><div className="brand-name">GCS Books</div><div className="brand-subtitle">Global Creative Services</div></div></div>
+        <div className="auth-story-copy"><div className="eyebrow auth-eyebrow">The calm side of business</div><h1>Clarity for the work behind the work.</h1><p>Keep invoices, expenses, and momentum in one thoughtful workspace—so your energy stays with the business.</p></div>
+        <div className="auth-proof-row"><div><strong>18.4%</strong><span>more cash in this month</span></div><div><strong>$31.4k</strong><span>net income on track</span></div></div>
+        <div className="auth-quote"><span className="quote-mark">“</span><p>When the numbers feel lighter, the next decision gets clearer.</p><small>— GCS advisor note</small></div>
+      </section>
+
+      <section className="auth-card-wrap">
+        <div className="auth-card-topline"><span>GCS Books</span><span><i className="secure-dot" /> Secure workspace</span></div>
+        <div className="auth-card">
+          <div className="auth-card-header"><div className="auth-mini-mark">G</div><div className="eyebrow">{isSignup ? 'Start with a clean slate' : 'Welcome back'}</div><h2>{isSignup ? 'Create your workspace' : 'Sign in to your books'}</h2><p>{isSignup ? 'Set up your business home in under two minutes.' : 'Your numbers are ready when you are.'}</p></div>
+          <div className="auth-mode-toggle" role="tablist" aria-label="Authentication mode"><button className={!isSignup ? 'selected' : ''} onClick={() => setAuthMode('login')} type="button">Sign in</button><button className={isSignup ? 'selected' : ''} onClick={() => setAuthMode('signup')} type="button">Create account</button></div>
+          <form className="auth-form" onSubmit={onSubmit}>
+            {isSignup && <label className="auth-field"><span>Your name</span><input autoComplete="name" placeholder="Shadma Mittal" value={authName} onChange={(event) => setAuthName(event.target.value)} /></label>}
+            <label className="auth-field"><span>Work email</span><input type="email" autoComplete="email" placeholder="you@company.com" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} /></label>
+            <label className="auth-field"><span>Password</span><span className="password-wrap"><input type={showPassword ? 'text' : 'password'} autoComplete={isSignup ? 'new-password' : 'current-password'} placeholder="Enter your password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} /><button type="button" className="password-toggle" onClick={() => setShowPassword(!showPassword)}>{showPassword ? 'Hide' : 'Show'}</button></span></label>
+            <div className="auth-options">{!isSignup && <label className="remember-option"><input type="checkbox" checked={rememberMe} onChange={(event) => setRememberMe(event.target.checked)} /><span>Keep me signed in</span></label>}<button type="button" className="forgot-button" onClick={() => { if (!authEmail.trim()) { setAuthEmail('you@company.com'); } }}>Forgot password?</button></div>
+            {authError && <div className="auth-message" role="alert"><span>!</span>{authError}</div>}
+            <button className="auth-submit" type="submit">{isSignup ? 'Create my workspace' : 'Sign in to workspace'}<span>↗</span></button>
+          </form>
+          <div className="auth-divider"><span>or</span></div>
+          <button className="demo-button" type="button" onClick={onDemo}><span className="demo-icon">✦</span><span><strong>Use demo workspace</strong><small>Explore the dashboard with sample data</small></span><span className="demo-arrow">↗</span></button>
+          <p className="auth-switch">{isSignup ? 'Already have an account?' : 'New to GCS Books?'} <button type="button" onClick={() => setAuthMode(isSignup ? 'login' : 'signup')}>{isSignup ? 'Sign in' : 'Create an account'}</button></p>
+        </div>
+        <div className="auth-card-footer"><span>◈ Your data stays yours.</span><span>Privacy · Terms</span></div>
+      </section>
     </main>
   );
 }
