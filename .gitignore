@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env*
+!.env.example
 .DS_Store
 *.local
 gcs-books-site.tar.gz
@@ -10,3 +11,4 @@ gcs-books-site.tar.gz
 .playwright-mcp/
 next-env.d.ts
 gcsrvllc-home.png
+finance-mobile-dashboard.png
