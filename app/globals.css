@@ -188,10 +188,12 @@ h2 { color: #27342c; font-size: 15px; font-weight: 720; letter-spacing: -.025em;
 .import-table-row small { overflow: hidden; color: #a0aaa3; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .import-status { justify-self: start; padding: 4px 6px; border-radius: 20px; background: #f1f5ef; color: #7b8f7f; font-size: 8px; }
 .import-status.paid { background: #edf8e8; color: #5aab4f; }.import-status.pending { background: #f1edfb; color: #8d78cf; }
-.import-history-row > span:last-child { color: #6d8d70; font-size: 8px; white-space: nowrap; }
+.import-history-status { color: #6d8d70; font-size: 8px; white-space: nowrap; }
+.import-history-delete { flex: 0 0 auto; padding: 6px 8px; border: 1px solid #f0d7cb; border-radius: 6px; background: #fff8f4; color: #b86c55; font-size: 8px; font-weight: 760; }
+.import-history-delete:hover { border-color: #e7aa96; background: #fff0e9; color: #9f513c; }
 .imported-report-card .muted-copy { max-width: 720px; }
 @media (max-width: 1120px) { .import-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 720px) { .import-layout, .import-analysis-grid { grid-template-columns: 1fr; }.import-kpi-grid { grid-template-columns: 1fr 1fr; }.import-source-badge { align-self: stretch; align-items: flex-start; text-align: left; }.import-table-heading { flex-direction: column; }.import-history-row { align-items: flex-start; }.import-history-row > span:last-child { margin-left: 44px; } }
+@media (max-width: 720px) { .import-layout, .import-analysis-grid { grid-template-columns: 1fr; }.import-kpi-grid { grid-template-columns: 1fr 1fr; }.import-source-badge { align-self: stretch; align-items: flex-start; text-align: left; }.import-table-heading { flex-direction: column; }.import-history-row { align-items: flex-start; flex-wrap: wrap; }.import-history-status { margin-left: 44px; }.import-history-delete { margin-left: auto; } }
 @media (max-width: 410px) { .import-kpi-grid { grid-template-columns: 1fr; } }
 .auth-resend { align-self: flex-start; margin-top: -5px; padding: 0; background: transparent; color: #5a9d50; font-size: 9px; font-weight: 760; text-decoration: underline; text-underline-offset: 3px; }
 .auth-resend:disabled { color: #9aa79d; cursor: wait; }

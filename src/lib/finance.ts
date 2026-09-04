@@ -28,6 +28,7 @@ export type FinanceTransaction = {
   notes: string | null;
   tags: string[];
   is_recurring: boolean;
+  import_batch_id?: string | null;
   finance_accounts?: { name: string } | null;
   finance_categories?: { name: string; color: string; icon: string } | null;
 };

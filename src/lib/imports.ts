@@ -13,6 +13,8 @@ export type ImportReviewRow = {
 };
 
 export type ImportedPayment = {
+  id?: string;
+  batch_id?: string;
   source_key: string;
   transaction_at: string;
   transaction_date: string;
@@ -36,6 +38,8 @@ export type ImportedPayment = {
 };
 
 export type ImportedPayout = {
+  id?: string;
+  batch_id?: string;
   source_key: string;
   payout_date: string;
   status: string;
@@ -422,6 +426,55 @@ export async function loadImportData(userId: string): Promise<ImportData> {
   const error = [batches, payments, payouts].find((result) => result.error)?.error;
   if (error) throw error;
   return { batches: (batches.data ?? []) as FinanceImportBatch[], payments: (payments.data ?? []) as ImportedPayment[], payouts: (payouts.data ?? []) as ImportedPayout[] };
+}
+
+export async function deleteImportedBatch(userId: string, batchId: string) {
+  if (!supabase) throw new Error('Supabase is not configured.');
+
+  const transactionsResult = await supabase
+    .from('finance_transactions')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('import_batch_id', batchId);
+  if (transactionsResult.error) throw transactionsResult.error;
+
+  const transactionIds = (transactionsResult.data ?? []).map((row) => row.id as string);
+  if (transactionIds.length) {
+    const splitResult = await supabase
+      .from('finance_splits')
+      .update({ transaction_id: null })
+      .eq('user_id', userId)
+      .in('transaction_id', transactionIds);
+    if (splitResult.error) throw splitResult.error;
+
+    const tagsResult = await supabase
+      .from('finance_transaction_tags')
+      .delete()
+      .eq('user_id', userId)
+      .in('transaction_id', transactionIds);
+    if (tagsResult.error) throw tagsResult.error;
+
+    const transactionsDeleteResult = await supabase
+      .from('finance_transactions')
+      .delete()
+      .eq('user_id', userId)
+      .eq('import_batch_id', batchId);
+    if (transactionsDeleteResult.error) throw transactionsDeleteResult.error;
+  }
+
+  const [paymentsResult, payoutsResult] = await Promise.all([
+    supabase.from('finance_payment_imports').delete().eq('user_id', userId).eq('batch_id', batchId),
+    supabase.from('finance_payouts').delete().eq('user_id', userId).eq('batch_id', batchId),
+  ]);
+  if (paymentsResult.error) throw paymentsResult.error;
+  if (payoutsResult.error) throw payoutsResult.error;
+
+  const batchResult = await supabase
+    .from('finance_import_batches')
+    .delete()
+    .eq('user_id', userId)
+    .eq('id', batchId);
+  if (batchResult.error) throw batchResult.error;
 }
 
 async function ensureImportAccount(userId: string) {
