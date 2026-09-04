@@ -447,6 +447,23 @@ async function ensureImportCategory(userId: string, name: string, kind: 'income'
 
 const chunk = <T,>(items: T[], size = 250) => Array.from({ length: Math.ceil(items.length / size) }, (_, index) => items.slice(index * size, index * size + size));
 
+// PostgREST encodes every value in an `in` filter into the request URL. Shopify
+// fingerprints are intentionally detailed, so a full-file lookup can exceed
+// the URL size accepted by the API. Keep lookups bounded while preserving the
+// same user-scoped duplicate detection semantics.
+const SOURCE_KEY_LOOKUP_CHUNK_SIZE = 50;
+async function loadExistingSourceKeys(table: 'finance_payment_imports' | 'finance_payouts', userId: string, keys: string[]) {
+  if (!supabase) throw new Error('Supabase is not configured.');
+  const existingKeys = new Set<string>();
+  for (const keyChunk of chunk([...new Set(keys)], SOURCE_KEY_LOOKUP_CHUNK_SIZE)) {
+    if (!keyChunk.length) continue;
+    const response = await supabase.from(table).select('source_key').eq('user_id', userId).in('source_key', keyChunk);
+    if (response.error) throw response.error;
+    for (const row of response.data ?? []) existingKeys.add(row.source_key as string);
+  }
+  return existingKeys;
+}
+
 export async function persistParsedImport(userId: string, file: File, parsed: ParsedImport) {
   if (!supabase) throw new Error('Connect Supabase before importing persistent data.');
   const analysis = analyzeImportData(parsed);
@@ -457,9 +474,7 @@ export async function persistParsedImport(userId: string, file: File, parsed: Pa
   try {
     if (paymentImport) {
       const keys = parsed.payments.map((item) => item.source_key);
-      const existing = keys.length ? await supabase.from('finance_payment_imports').select('source_key').eq('user_id', userId).in('source_key', keys) : { data: [], error: null };
-      if (existing.error) throw existing.error;
-      const seenKeys = new Set((existing.data ?? []).map((item) => item.source_key));
+      const seenKeys = await loadExistingSourceKeys('finance_payment_imports', userId, keys);
       const fresh = parsed.payments.filter((item) => { if (seenKeys.has(item.source_key)) return false; seenKeys.add(item.source_key); return true; });
       for (const part of chunk(fresh)) { const response = await supabase.from('finance_payment_imports').insert(part.map((item) => ({ ...item, user_id: userId, batch_id: batch.id }))); if (response.error) throw response.error; }
       if (fresh.length) {
@@ -476,9 +491,7 @@ export async function persistParsedImport(userId: string, file: File, parsed: Pa
       return { batch: { ...batch, imported_count: fresh.length, duplicate_count: parsed.payments.length - fresh.length, review_count: parsed.reviewRows.length, status: 'completed' as const }, importedPayments: fresh.length, importedPayouts: 0, duplicateCount: parsed.payments.length - fresh.length, reviewCount: parsed.reviewRows.length };
     }
     const keys = parsed.payouts.map((item) => item.source_key);
-    const existing = keys.length ? await supabase.from('finance_payouts').select('source_key').eq('user_id', userId).in('source_key', keys) : { data: [], error: null };
-    if (existing.error) throw existing.error;
-    const seenKeys = new Set((existing.data ?? []).map((item) => item.source_key));
+    const seenKeys = await loadExistingSourceKeys('finance_payouts', userId, keys);
     const fresh = parsed.payouts.filter((item) => { if (seenKeys.has(item.source_key)) return false; seenKeys.add(item.source_key); return true; });
     for (const part of chunk(fresh)) { const response = await supabase.from('finance_payouts').insert(part.map((item) => ({ ...item, user_id: userId, batch_id: batch.id }))); if (response.error) throw response.error; }
     await supabase.from('finance_import_batches').update({ imported_count: fresh.length, duplicate_count: parsed.payouts.length - fresh.length, review_count: parsed.reviewRows.length, status: 'completed' }).eq('id', batch.id).eq('user_id', userId);
