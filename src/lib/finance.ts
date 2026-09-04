@@ -55,7 +55,7 @@ export async function loadFinanceData(userId: string) {
   const [accounts, categories, transactions, budgets, goals, recurring, investments, loans, splits, notifications] = await Promise.all([
     supabase.from('finance_accounts').select('*').eq('user_id', userId).eq('is_archived', false).order('created_at'),
     supabase.from('finance_categories').select('*').eq('user_id', userId).order('name'),
-    supabase.from('finance_transactions').select('*, finance_accounts(name), finance_categories(name, color, icon)').eq('user_id', userId).order('transaction_date', { ascending: false }).limit(80),
+    supabase.from('finance_transactions').select('*, finance_accounts(name), finance_categories(name, color, icon)').eq('user_id', userId).order('transaction_date', { ascending: false }).limit(2000),
     supabase.from('finance_budgets').select('*').eq('user_id', userId).eq('month_start', monthStart()).order('name'),
     supabase.from('finance_goals').select('*').eq('user_id', userId).order('target_date'),
     supabase.from('finance_recurring_payments').select('*').eq('user_id', userId).eq('is_active', true).order('next_due_date'),
