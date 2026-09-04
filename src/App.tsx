@@ -116,6 +116,8 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState('');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [canResendConfirmation, setCanResendConfirmation] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [view, setView] = useState<View>('overview');
   const [data, setData] = useState<FinanceData>(emptyData);
@@ -181,7 +183,8 @@ export default function App() {
   const showToast = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 3200); };
 
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setAuthError(''); setAuthMessage('');
+    event.preventDefault(); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false);
+    const normalizedEmail = authEmail.trim().toLowerCase();
     if (authMode === 'reset') {
       if (passwordRecovery) {
         if (authPassword.length < 8) { setAuthError('Use at least 8 characters for your new password.'); return; }
@@ -190,9 +193,9 @@ export default function App() {
         if (error) setAuthError(error.message); else { setPasswordRecovery(false); setAuthMessage('Password updated. Your workspace is ready.'); }
         return;
       }
-      if (!authEmail.trim()) { setAuthError('Enter your email first.'); return; }
+      if (!normalizedEmail) { setAuthError('Enter your email first.'); return; }
       if (!supabase) { setAuthMessage('Demo mode does not send emails. Use the demo workspace instead.'); return; }
-      setAuthLoading(true); const { error } = await supabase.auth.resetPasswordForEmail(authEmail, { redirectTo: window.location.origin }); setAuthLoading(false);
+      setAuthLoading(true); const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo: window.location.origin }); setAuthLoading(false);
       if (error) setAuthError(error.message); else setAuthMessage('Reset instructions are on the way. Check your inbox.');
       return;
     }
@@ -200,12 +203,28 @@ export default function App() {
     if (!supabase) { setDemoMode(true); return; }
     setAuthLoading(true);
     const response = authMode === 'signup'
-      ? await supabase.auth.signUp({ email: authEmail, password: authPassword, options: { data: { full_name: authName }, emailRedirectTo: window.location.origin } })
-      : await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+      ? await supabase.auth.signUp({ email: normalizedEmail, password: authPassword, options: { data: { full_name: authName }, emailRedirectTo: window.location.origin } })
+      : await supabase.auth.signInWithPassword({ email: normalizedEmail, password: authPassword });
     setAuthLoading(false);
-    if (response.error) { setAuthError(response.error.message); return; }
+    if (response.error) {
+      const emailNotConfirmed = response.error.message.toLowerCase().includes('email not confirmed');
+      setCanResendConfirmation(emailNotConfirmed);
+      setAuthError(emailNotConfirmed ? 'Your email is not confirmed yet. Check your inbox or resend the confirmation email below.' : response.error.message);
+      return;
+    }
     if (authMode === 'signup' && !response.data.session) setAuthMessage('Check your email to confirm your account, then sign in.');
     setSession(response.data.session);
+  }
+
+  async function resendConfirmation() {
+    const normalizedEmail = authEmail.trim().toLowerCase();
+    if (!normalizedEmail) { setAuthError('Enter your email first.'); return; }
+    if (!supabase) { setAuthError('Confirmation emails require a connected Supabase project.'); return; }
+    setResendLoading(true); setAuthError(''); setAuthMessage('');
+    const { error } = await supabase.auth.resend({ type: 'signup', email: normalizedEmail, options: { emailRedirectTo: window.location.origin } });
+    setResendLoading(false);
+    if (error) setAuthError(error.message);
+    else { setCanResendConfirmation(false); setAuthMessage('A fresh confirmation email is on the way. Check spam or promotions too.'); }
   }
 
   async function logout() {
@@ -399,7 +418,7 @@ export default function App() {
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `gcs-books-${isoToday()}.csv`; anchor.click(); URL.revokeObjectURL(url); showToast('CSV report downloaded.');
   }
 
-  if ((!session || passwordRecovery) && !demoMode) return <AuthScreen mode={authMode} passwordRecovery={passwordRecovery} onCancelRecovery={() => { setPasswordRecovery(false); setAuthMode('login'); setAuthError(''); setAuthMessage(''); }} setMode={(mode) => { setAuthMode(mode); setAuthError(''); setAuthMessage(''); }} email={authEmail} setEmail={setAuthEmail} password={authPassword} setPassword={setAuthPassword} name={authName} setName={setAuthName} message={authMessage} error={authError} loading={authLoading} onSubmit={handleAuth} onDemo={startDemo} />;
+  if ((!session || passwordRecovery) && !demoMode) return <AuthScreen mode={authMode} passwordRecovery={passwordRecovery} onCancelRecovery={() => { setPasswordRecovery(false); setAuthMode('login'); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false); }} setMode={(mode) => { setAuthMode(mode); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false); }} email={authEmail} setEmail={setAuthEmail} password={authPassword} setPassword={setAuthPassword} name={authName} setName={setAuthName} message={authMessage} error={authError} loading={authLoading} canResendConfirmation={canResendConfirmation} resendLoading={resendLoading} onResendConfirmation={resendConfirmation} onSubmit={handleAuth} onDemo={startDemo} />;
   if (loading && !demoMode) return <LoadingScreen />;
 
   const currentView = views.find((item) => item.id === view) || views[0];
@@ -442,9 +461,9 @@ function renderView(view: View, data: FinanceData, stats: { balance: number; inc
   }
 }
 
-function AuthScreen({ mode, passwordRecovery, onCancelRecovery, setMode, email, setEmail, password, setPassword, name, setName, message, error, loading, onSubmit, onDemo }: { mode: AuthMode; passwordRecovery: boolean; onCancelRecovery: () => void; setMode: (mode: AuthMode) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; name: string; setName: (value: string) => void; message: string; error: string; loading: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onDemo: () => void }) {
+function AuthScreen({ mode, passwordRecovery, onCancelRecovery, setMode, email, setEmail, password, setPassword, name, setName, message, error, loading, canResendConfirmation, resendLoading, onResendConfirmation, onSubmit, onDemo }: { mode: AuthMode; passwordRecovery: boolean; onCancelRecovery: () => void; setMode: (mode: AuthMode) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; name: string; setName: (value: string) => void; message: string; error: string; loading: boolean; canResendConfirmation: boolean; resendLoading: boolean; onResendConfirmation: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onDemo: () => void }) {
   const reset = mode === 'reset'; const signup = mode === 'signup'; const recovery = reset && passwordRecovery;
-   return <main className="auth-shell"><div className="auth-glow auth-glow-one" /><section className="auth-story"><div className="auth-brand-lockup"><div className="brand-mark"><span>G</span></div><div><div className="brand-name">GCS Books</div><div className="brand-subtitle">Global Creative Services</div></div></div><div className="auth-story-copy"><div className="eyebrow auth-eyebrow">Your calmer money practice</div><h1>Know your numbers. Keep your options open.</h1><p>Accounts, bills, goals, and investments in one secure, human workspace built for real life.</p></div><div className="auth-proof-row"><div><strong>INR first</strong><span>multi-currency ready</span></div><div><strong>Private</strong><span>row-level protected</span></div></div></section><section className="auth-card-wrap"><div className="auth-card-topline"><span>GCS Books</span><span><i className="secure-dot" /> Secure workspace</span></div><div className="auth-card"><div className="auth-card-header"><div className="auth-mini-mark">G</div><div className="eyebrow">{recovery ? 'Set a new password' : reset ? 'Account recovery' : signup ? 'Start with a clean slate' : 'Welcome back'}</div><h2>{recovery ? 'Create a new password' : reset ? 'Reset your password' : signup ? 'Create your workspace' : 'Sign in to your books'}</h2><p>{recovery ? 'Choose a strong password to keep your workspace secure.' : reset ? 'We will send a secure reset link to your email.' : signup ? 'Set up your financial home in under two minutes.' : 'Your numbers are ready when you are.'}</p></div>{!reset && <div className="auth-mode-toggle"><button className={!signup ? 'selected' : ''} type="button" onClick={() => setMode('login')}>Sign in</button><button className={signup ? 'selected' : ''} type="button" onClick={() => setMode('signup')}>Create account</button></div>}<form className="auth-form" onSubmit={onSubmit}>{signup && <label className="auth-field"><span>Your name</span><input autoComplete="name" placeholder="Shadma Mittal" value={name} onChange={(event) => setName(event.target.value)} /></label>}{!recovery && <label className="auth-field"><span>Work email</span><input type="email" autoComplete="email" placeholder="you@company.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}{(!reset || recovery) && <label className="auth-field"><span>Password</span><input type="password" autoComplete={signup || recovery ? 'new-password' : 'current-password'} placeholder={recovery ? 'Choose a new password' : 'Enter your password'} value={password} onChange={(event) => setPassword(event.target.value)} /></label>}{error && <div className="auth-message"><span>!</span>{error}</div>}{message && <div className="auth-success"><span>✓</span>{message}</div>}<button className="auth-submit" disabled={loading} type="submit">{loading ? 'Working…' : recovery ? 'Update password' : reset ? 'Send reset link' : signup ? 'Create my workspace' : 'Sign in to workspace'}<span>↗</span></button></form>{!reset && <><div className="auth-divider"><span>or</span></div><button className="demo-button" type="button" onClick={onDemo}><span className="demo-icon">✦</span><span><strong>Preview demo workspace</strong><small>Explore the dashboard with sample data</small></span><span className="demo-arrow">↗</span></button></>}<p className="auth-switch">{reset ? <button type="button" onClick={passwordRecovery ? onCancelRecovery : () => setMode('login')}>← Back to sign in</button> : <><button type="button" onClick={() => setMode(signup ? 'login' : 'reset')}>{signup ? 'Already have an account? Sign in' : 'Forgot password?'}</button></>}</p></div><div className="auth-card-footer"><span>◈ Your data stays yours.</span><span>Privacy · Terms</span></div></section></main>;
+   return <main className="auth-shell"><div className="auth-glow auth-glow-one" /><section className="auth-story"><div className="auth-brand-lockup"><div className="brand-mark"><span>G</span></div><div><div className="brand-name">GCS Books</div><div className="brand-subtitle">Global Creative Services</div></div></div><div className="auth-story-copy"><div className="eyebrow auth-eyebrow">Your calmer money practice</div><h1>Know your numbers. Keep your options open.</h1><p>Accounts, bills, goals, and investments in one secure, human workspace built for real life.</p></div><div className="auth-proof-row"><div><strong>INR first</strong><span>multi-currency ready</span></div><div><strong>Private</strong><span>row-level protected</span></div></div></section><section className="auth-card-wrap"><div className="auth-card-topline"><span>GCS Books</span><span><i className="secure-dot" /> Secure workspace</span></div><div className="auth-card"><div className="auth-card-header"><div className="auth-mini-mark">G</div><div className="eyebrow">{recovery ? 'Set a new password' : reset ? 'Account recovery' : signup ? 'Start with a clean slate' : 'Welcome back'}</div><h2>{recovery ? 'Create a new password' : reset ? 'Reset your password' : signup ? 'Create your workspace' : 'Sign in to your books'}</h2><p>{recovery ? 'Choose a strong password to keep your workspace secure.' : reset ? 'We will send a secure reset link to your email.' : signup ? 'Set up your financial home in under two minutes.' : 'Your numbers are ready when you are.'}</p></div>{!reset && <div className="auth-mode-toggle"><button className={!signup ? 'selected' : ''} type="button" onClick={() => setMode('login')}>Sign in</button><button className={signup ? 'selected' : ''} type="button" onClick={() => setMode('signup')}>Create account</button></div>}<form className="auth-form" onSubmit={onSubmit}>{signup && <label className="auth-field"><span>Your name</span><input autoComplete="name" placeholder="Shadma Mittal" value={name} onChange={(event) => setName(event.target.value)} /></label>}{!recovery && <label className="auth-field"><span>Work email</span><input type="email" autoComplete="email" placeholder="you@company.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}{(!reset || recovery) && <label className="auth-field"><span>Password</span><input type="password" autoComplete={signup || recovery ? 'new-password' : 'current-password'} placeholder={recovery ? 'Choose a new password' : 'Enter your password'} value={password} onChange={(event) => setPassword(event.target.value)} /></label>}{error && <div className="auth-message"><span>!</span>{error}</div>}{canResendConfirmation && <button className="auth-resend" type="button" disabled={resendLoading} onClick={onResendConfirmation}>{resendLoading ? 'Sending confirmation email…' : 'Resend confirmation email'}</button>}{message && <div className="auth-success"><span>✓</span>{message}</div>}<button className="auth-submit" disabled={loading || resendLoading} type="submit">{loading ? 'Working…' : recovery ? 'Update password' : reset ? 'Send reset link' : signup ? 'Create my workspace' : 'Sign in to workspace'}<span>↗</span></button></form>{!reset && <><div className="auth-divider"><span>or</span></div><button className="demo-button" type="button" onClick={onDemo}><span className="demo-icon">✦</span><span><strong>Preview demo workspace</strong><small>Explore the dashboard with sample data</small></span><span className="demo-arrow">↗</span></button></>}<p className="auth-switch">{reset ? <button type="button" onClick={passwordRecovery ? onCancelRecovery : () => setMode('login')}>← Back to sign in</button> : <><button type="button" onClick={() => setMode(signup ? 'login' : 'reset')}>{signup ? 'Already have an account? Sign in' : 'Forgot password?'}</button></>}</p></div><div className="auth-card-footer"><span>◈ Your data stays yours.</span><span>Privacy · Terms</span></div></section></main>;
 }
 
 function LoadingScreen() { return <main className="loading-screen"><div className="loading-mark">G</div><div className="loading-line" /><p>Loading your money picture…</p></main>; }

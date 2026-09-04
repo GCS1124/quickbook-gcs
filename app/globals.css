@@ -193,3 +193,5 @@ h2 { color: #27342c; font-size: 15px; font-weight: 720; letter-spacing: -.025em;
 @media (max-width: 1120px) { .import-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 720px) { .import-layout, .import-analysis-grid { grid-template-columns: 1fr; }.import-kpi-grid { grid-template-columns: 1fr 1fr; }.import-source-badge { align-self: stretch; align-items: flex-start; text-align: left; }.import-table-heading { flex-direction: column; }.import-history-row { align-items: flex-start; }.import-history-row > span:last-child { margin-left: 44px; } }
 @media (max-width: 410px) { .import-kpi-grid { grid-template-columns: 1fr; } }
+.auth-resend { align-self: flex-start; margin-top: -5px; padding: 0; background: transparent; color: #5a9d50; font-size: 9px; font-weight: 760; text-decoration: underline; text-underline-offset: 3px; }
+.auth-resend:disabled { color: #9aa79d; cursor: wait; }
