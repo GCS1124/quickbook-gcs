@@ -105,6 +105,20 @@ const demoData: FinanceData = {
 const newTransaction = (): TransactionForm => ({ type: 'expense', amount: '', accountId: '', transferAccountId: '', categoryId: '', merchant: '', description: '', transactionDate: isoToday(), tags: '' });
 const number = (value: number | string | null | undefined) => Number(value ?? 0);
 const dateLabel = (value: string | null | undefined) => value ? new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(`${value}T00:00:00`)) : '—';
+const AUTH_EMAIL_COOLDOWN_KEY = 'gcs-books-auth-email-cooldown-until';
+const AUTH_EMAIL_RETRY_COOLDOWN_MS = 60 * 1000;
+const AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS = 60 * 60 * 1000;
+const AUTH_EMAIL_RATE_LIMIT_MESSAGE = 'Supabase email sending is temporarily limited. Please wait for the quota to reset before requesting another email. For production, configure a custom SMTP provider in Supabase.';
+const isEmailRateLimitError = (message: string) => /email.*rate.?limit|rate.?limit.*email|too many.*email|email.*too many/i.test(message.toLowerCase());
+const readAuthEmailCooldown = () => {
+  try {
+    const stored = Number(window.localStorage.getItem(AUTH_EMAIL_COOLDOWN_KEY) || 0);
+    return stored > Date.now() ? stored : 0;
+  } catch {
+    return 0;
+  }
+};
+const formatCooldown = (seconds: number) => seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -118,6 +132,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [canResendConfirmation, setCanResendConfirmation] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
+  const [emailCooldownUntil, setEmailCooldownUntil] = useState(readAuthEmailCooldown);
+  const [emailCooldownSeconds, setEmailCooldownSeconds] = useState(0);
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [view, setView] = useState<View>('overview');
   const [data, setData] = useState<FinanceData>(emptyData);
@@ -180,7 +196,29 @@ export default function App() {
 
   useEffect(() => { if (session?.user.id && !demoMode) void refreshData(session.user.id); }, [demoMode, refreshData, session?.user.id]);
 
+  useEffect(() => {
+    const updateCooldown = () => {
+      const seconds = Math.max(0, Math.ceil((emailCooldownUntil - Date.now()) / 1000));
+      setEmailCooldownSeconds(seconds);
+      if (!seconds && emailCooldownUntil) {
+        setEmailCooldownUntil(0);
+        try { window.localStorage.removeItem(AUTH_EMAIL_COOLDOWN_KEY); } catch { /* localStorage may be unavailable */ }
+      }
+    };
+    updateCooldown();
+    if (!emailCooldownUntil) return;
+    const timer = window.setInterval(updateCooldown, 1000);
+    return () => window.clearInterval(timer);
+  }, [emailCooldownUntil]);
+
   const showToast = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 3200); };
+
+  function activateEmailCooldown(durationMs: number) {
+    const until = Date.now() + durationMs;
+    setEmailCooldownUntil(until);
+    setEmailCooldownSeconds(Math.ceil(durationMs / 1000));
+    try { window.localStorage.setItem(AUTH_EMAIL_COOLDOWN_KEY, String(until)); } catch { /* localStorage may be unavailable */ }
+  }
 
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false);
@@ -196,7 +234,10 @@ export default function App() {
       if (!normalizedEmail) { setAuthError('Enter your email first.'); return; }
       if (!supabase) { setAuthMessage('Demo mode does not send emails. Use the demo workspace instead.'); return; }
       setAuthLoading(true); const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo: window.location.origin }); setAuthLoading(false);
-      if (error) setAuthError(error.message); else setAuthMessage('Reset instructions are on the way. Check your inbox.');
+      if (error) {
+        if (isEmailRateLimitError(error.message)) activateEmailCooldown(AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS);
+        setAuthError(isEmailRateLimitError(error.message) ? AUTH_EMAIL_RATE_LIMIT_MESSAGE : error.message);
+      } else { activateEmailCooldown(AUTH_EMAIL_RETRY_COOLDOWN_MS); setAuthMessage('Reset instructions are on the way. Check your inbox.'); }
       return;
     }
     if (!authEmail.trim() || !authPassword.trim() || (authMode === 'signup' && !authName.trim())) { setAuthError(authMode === 'signup' ? 'Add your name, email, and password.' : 'Enter your email and password to continue.'); return; }
@@ -208,8 +249,10 @@ export default function App() {
     setAuthLoading(false);
     if (response.error) {
       const emailNotConfirmed = response.error.message.toLowerCase().includes('email not confirmed');
+      const emailRateLimited = isEmailRateLimitError(response.error.message);
+      if (emailRateLimited) activateEmailCooldown(AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS);
       setCanResendConfirmation(emailNotConfirmed);
-      setAuthError(emailNotConfirmed ? 'Your email is not confirmed yet. Check your inbox or resend the confirmation email below.' : response.error.message);
+      setAuthError(emailRateLimited ? AUTH_EMAIL_RATE_LIMIT_MESSAGE : emailNotConfirmed ? 'Your email is not confirmed yet. Check your inbox or resend the confirmation email below.' : response.error.message);
       return;
     }
     if (authMode === 'signup' && !response.data.session) setAuthMessage('Check your email to confirm your account, then sign in.');
@@ -220,11 +263,14 @@ export default function App() {
     const normalizedEmail = authEmail.trim().toLowerCase();
     if (!normalizedEmail) { setAuthError('Enter your email first.'); return; }
     if (!supabase) { setAuthError('Confirmation emails require a connected Supabase project.'); return; }
+    if (emailCooldownSeconds > 0) { setAuthError(`Please wait ${formatCooldown(emailCooldownSeconds)} before requesting another email.`); return; }
     setResendLoading(true); setAuthError(''); setAuthMessage('');
     const { error } = await supabase.auth.resend({ type: 'signup', email: normalizedEmail, options: { emailRedirectTo: window.location.origin } });
     setResendLoading(false);
-    if (error) setAuthError(error.message);
-    else { setCanResendConfirmation(false); setAuthMessage('A fresh confirmation email is on the way. Check spam or promotions too.'); }
+    if (error) {
+      if (isEmailRateLimitError(error.message)) activateEmailCooldown(AUTH_EMAIL_RATE_LIMIT_COOLDOWN_MS);
+      setAuthError(isEmailRateLimitError(error.message) ? AUTH_EMAIL_RATE_LIMIT_MESSAGE : error.message);
+    } else { activateEmailCooldown(AUTH_EMAIL_RETRY_COOLDOWN_MS); setCanResendConfirmation(false); setAuthMessage('A fresh confirmation email is on the way. Check spam or promotions too.'); }
   }
 
   async function logout() {
@@ -418,7 +464,7 @@ export default function App() {
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `gcs-books-${isoToday()}.csv`; anchor.click(); URL.revokeObjectURL(url); showToast('CSV report downloaded.');
   }
 
-  if ((!session || passwordRecovery) && !demoMode) return <AuthScreen mode={authMode} passwordRecovery={passwordRecovery} onCancelRecovery={() => { setPasswordRecovery(false); setAuthMode('login'); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false); }} setMode={(mode) => { setAuthMode(mode); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false); }} email={authEmail} setEmail={setAuthEmail} password={authPassword} setPassword={setAuthPassword} name={authName} setName={setAuthName} message={authMessage} error={authError} loading={authLoading} canResendConfirmation={canResendConfirmation} resendLoading={resendLoading} onResendConfirmation={resendConfirmation} onSubmit={handleAuth} onDemo={startDemo} />;
+  if ((!session || passwordRecovery) && !demoMode) return <AuthScreen mode={authMode} passwordRecovery={passwordRecovery} onCancelRecovery={() => { setPasswordRecovery(false); setAuthMode('login'); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false); }} setMode={(mode) => { setAuthMode(mode); setAuthError(''); setAuthMessage(''); setCanResendConfirmation(false); }} email={authEmail} setEmail={setAuthEmail} password={authPassword} setPassword={setAuthPassword} name={authName} setName={setAuthName} message={authMessage} error={authError} loading={authLoading} canResendConfirmation={canResendConfirmation} resendLoading={resendLoading} emailCooldownSeconds={emailCooldownSeconds} onResendConfirmation={resendConfirmation} onSubmit={handleAuth} onDemo={startDemo} />;
   if (loading && !demoMode) return <LoadingScreen />;
 
   const currentView = views.find((item) => item.id === view) || views[0];
@@ -461,9 +507,9 @@ function renderView(view: View, data: FinanceData, stats: { balance: number; inc
   }
 }
 
-function AuthScreen({ mode, passwordRecovery, onCancelRecovery, setMode, email, setEmail, password, setPassword, name, setName, message, error, loading, canResendConfirmation, resendLoading, onResendConfirmation, onSubmit, onDemo }: { mode: AuthMode; passwordRecovery: boolean; onCancelRecovery: () => void; setMode: (mode: AuthMode) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; name: string; setName: (value: string) => void; message: string; error: string; loading: boolean; canResendConfirmation: boolean; resendLoading: boolean; onResendConfirmation: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onDemo: () => void }) {
+function AuthScreen({ mode, passwordRecovery, onCancelRecovery, setMode, email, setEmail, password, setPassword, name, setName, message, error, loading, canResendConfirmation, resendLoading, emailCooldownSeconds, onResendConfirmation, onSubmit, onDemo }: { mode: AuthMode; passwordRecovery: boolean; onCancelRecovery: () => void; setMode: (mode: AuthMode) => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; name: string; setName: (value: string) => void; message: string; error: string; loading: boolean; canResendConfirmation: boolean; resendLoading: boolean; emailCooldownSeconds: number; onResendConfirmation: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onDemo: () => void }) {
   const reset = mode === 'reset'; const signup = mode === 'signup'; const recovery = reset && passwordRecovery;
-   return <main className="auth-shell"><div className="auth-glow auth-glow-one" /><section className="auth-story"><div className="auth-brand-lockup"><div className="brand-mark"><span>G</span></div><div><div className="brand-name">GCS Books</div><div className="brand-subtitle">Global Creative Services</div></div></div><div className="auth-story-copy"><div className="eyebrow auth-eyebrow">Your calmer money practice</div><h1>Know your numbers. Keep your options open.</h1><p>Accounts, bills, goals, and investments in one secure, human workspace built for real life.</p></div><div className="auth-proof-row"><div><strong>INR first</strong><span>multi-currency ready</span></div><div><strong>Private</strong><span>row-level protected</span></div></div></section><section className="auth-card-wrap"><div className="auth-card-topline"><span>GCS Books</span><span><i className="secure-dot" /> Secure workspace</span></div><div className="auth-card"><div className="auth-card-header"><div className="auth-mini-mark">G</div><div className="eyebrow">{recovery ? 'Set a new password' : reset ? 'Account recovery' : signup ? 'Start with a clean slate' : 'Welcome back'}</div><h2>{recovery ? 'Create a new password' : reset ? 'Reset your password' : signup ? 'Create your workspace' : 'Sign in to your books'}</h2><p>{recovery ? 'Choose a strong password to keep your workspace secure.' : reset ? 'We will send a secure reset link to your email.' : signup ? 'Set up your financial home in under two minutes.' : 'Your numbers are ready when you are.'}</p></div>{!reset && <div className="auth-mode-toggle"><button className={!signup ? 'selected' : ''} type="button" onClick={() => setMode('login')}>Sign in</button><button className={signup ? 'selected' : ''} type="button" onClick={() => setMode('signup')}>Create account</button></div>}<form className="auth-form" onSubmit={onSubmit}>{signup && <label className="auth-field"><span>Your name</span><input autoComplete="name" placeholder="Shadma Mittal" value={name} onChange={(event) => setName(event.target.value)} /></label>}{!recovery && <label className="auth-field"><span>Work email</span><input type="email" autoComplete="email" placeholder="you@company.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}{(!reset || recovery) && <label className="auth-field"><span>Password</span><input type="password" autoComplete={signup || recovery ? 'new-password' : 'current-password'} placeholder={recovery ? 'Choose a new password' : 'Enter your password'} value={password} onChange={(event) => setPassword(event.target.value)} /></label>}{error && <div className="auth-message"><span>!</span>{error}</div>}{canResendConfirmation && <button className="auth-resend" type="button" disabled={resendLoading} onClick={onResendConfirmation}>{resendLoading ? 'Sending confirmation email…' : 'Resend confirmation email'}</button>}{message && <div className="auth-success"><span>✓</span>{message}</div>}<button className="auth-submit" disabled={loading || resendLoading} type="submit">{loading ? 'Working…' : recovery ? 'Update password' : reset ? 'Send reset link' : signup ? 'Create my workspace' : 'Sign in to workspace'}<span>↗</span></button></form>{!reset && <><div className="auth-divider"><span>or</span></div><button className="demo-button" type="button" onClick={onDemo}><span className="demo-icon">✦</span><span><strong>Preview demo workspace</strong><small>Explore the dashboard with sample data</small></span><span className="demo-arrow">↗</span></button></>}<p className="auth-switch">{reset ? <button type="button" onClick={passwordRecovery ? onCancelRecovery : () => setMode('login')}>← Back to sign in</button> : <><button type="button" onClick={() => setMode(signup ? 'login' : 'reset')}>{signup ? 'Already have an account? Sign in' : 'Forgot password?'}</button></>}</p></div><div className="auth-card-footer"><span>◈ Your data stays yours.</span><span>Privacy · Terms</span></div></section></main>;
+   return <main className="auth-shell"><div className="auth-glow auth-glow-one" /><section className="auth-story"><div className="auth-brand-lockup"><div className="brand-mark"><span>G</span></div><div><div className="brand-name">GCS Books</div><div className="brand-subtitle">Global Creative Services</div></div></div><div className="auth-story-copy"><div className="eyebrow auth-eyebrow">Your calmer money practice</div><h1>Know your numbers. Keep your options open.</h1><p>Accounts, bills, goals, and investments in one secure, human workspace built for real life.</p></div><div className="auth-proof-row"><div><strong>INR first</strong><span>multi-currency ready</span></div><div><strong>Private</strong><span>row-level protected</span></div></div></section><section className="auth-card-wrap"><div className="auth-card-topline"><span>GCS Books</span><span><i className="secure-dot" /> Secure workspace</span></div><div className="auth-card"><div className="auth-card-header"><div className="auth-mini-mark">G</div><div className="eyebrow">{recovery ? 'Set a new password' : reset ? 'Account recovery' : signup ? 'Start with a clean slate' : 'Welcome back'}</div><h2>{recovery ? 'Create a new password' : reset ? 'Reset your password' : signup ? 'Create your workspace' : 'Sign in to your books'}</h2><p>{recovery ? 'Choose a strong password to keep your workspace secure.' : reset ? 'We will send a secure reset link to your email.' : signup ? 'Set up your financial home in under two minutes.' : 'Your numbers are ready when you are.'}</p></div>{!reset && <div className="auth-mode-toggle"><button className={!signup ? 'selected' : ''} type="button" onClick={() => setMode('login')}>Sign in</button><button className={signup ? 'selected' : ''} type="button" onClick={() => setMode('signup')}>Create account</button></div>}<form className="auth-form" onSubmit={onSubmit}>{signup && <label className="auth-field"><span>Your name</span><input autoComplete="name" placeholder="Shadma Mittal" value={name} onChange={(event) => setName(event.target.value)} /></label>}{!recovery && <label className="auth-field"><span>Work email</span><input type="email" autoComplete="email" placeholder="you@company.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}{(!reset || recovery) && <label className="auth-field"><span>Password</span><input type="password" autoComplete={signup || recovery ? 'new-password' : 'current-password'} placeholder={recovery ? 'Choose a new password' : 'Enter your password'} value={password} onChange={(event) => setPassword(event.target.value)} /></label>}{error && <div className="auth-message"><span>!</span>{error}</div>}{canResendConfirmation && <button className="auth-resend" type="button" disabled={resendLoading || emailCooldownSeconds > 0} onClick={onResendConfirmation}>{resendLoading ? 'Sending confirmation email…' : emailCooldownSeconds > 0 ? `Try again in ${formatCooldown(emailCooldownSeconds)}` : 'Resend confirmation email'}</button>}{message && <div className="auth-success"><span>✓</span>{message}</div>}<button className="auth-submit" disabled={loading || resendLoading} type="submit">{loading ? 'Working…' : recovery ? 'Update password' : reset ? 'Send reset link' : signup ? 'Create my workspace' : 'Sign in to workspace'}<span>↗</span></button></form>{!reset && <><div className="auth-divider"><span>or</span></div><button className="demo-button" type="button" onClick={onDemo}><span className="demo-icon">✦</span><span><strong>Preview demo workspace</strong><small>Explore the dashboard with sample data</small></span><span className="demo-arrow">↗</span></button></>}<p className="auth-switch">{reset ? <button type="button" onClick={passwordRecovery ? onCancelRecovery : () => setMode('login')}>← Back to sign in</button> : <><button type="button" onClick={() => setMode(signup ? 'login' : 'reset')}>{signup ? 'Already have an account? Sign in' : 'Forgot password?'}</button></>}</p></div><div className="auth-card-footer"><span>◈ Your data stays yours.</span><span>Privacy · Terms</span></div></section></main>;
 }
 
 function LoadingScreen() { return <main className="loading-screen"><div className="loading-mark">G</div><div className="loading-line" /><p>Loading your money picture…</p></main>; }
