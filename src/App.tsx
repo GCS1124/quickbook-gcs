@@ -119,6 +119,16 @@ const readAuthEmailCooldown = () => {
   }
 };
 const formatCooldown = (seconds: number) => seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
+const describeError = (error: unknown, fallback: string) => {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'object' && error !== null) {
+    const details = ['message', 'details', 'hint', 'code']
+      .map((key) => key in error && typeof error[key as keyof typeof error] === 'string' ? error[key as keyof typeof error] as string : '')
+      .filter(Boolean);
+    if (details.length) return details.join(' · ');
+  }
+  return fallback;
+};
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -171,9 +181,14 @@ export default function App() {
         result = await loadFinanceData(userId);
       }
       setData(result);
-      setImportedData(await loadImportData(userId));
+      try {
+        setImportedData(await loadImportData(userId));
+      } catch (error) {
+        setImportedData(emptyImportData);
+        setDataError(`Finance data loaded, but imported records are temporarily unavailable: ${describeError(error, 'Please retry shortly.')}`);
+      }
     } catch (error) {
-      setDataError(error instanceof Error ? error.message : 'We could not load your finance data.');
+      setDataError(describeError(error, 'We could not load your finance data.'));
     } finally {
       setLoading(false);
     }

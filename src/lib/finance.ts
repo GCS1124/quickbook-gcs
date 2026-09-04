@@ -64,8 +64,8 @@ export async function loadFinanceData(userId: string) {
     supabase.from('finance_splits').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
     supabase.from('finance_notifications').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(12),
   ]);
-  const error = [accounts, categories, transactions, budgets, goals, recurring, investments, loans, splits, notifications].find((result) => result.error)?.error;
-  if (error) throw error;
+  const criticalError = [accounts, categories, transactions].find((result) => result.error)?.error;
+  if (criticalError) throw criticalError;
   return {
     accounts: (accounts.data ?? []) as FinanceAccount[],
     categories: (categories.data ?? []) as FinanceCategory[],
