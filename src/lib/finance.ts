@@ -41,10 +41,13 @@ export type FinanceSplit = { id: string; participant_name: string; amount: numbe
 export type FinanceNotification = { id: string; kind: 'info' | 'warning' | 'success' | 'reminder'; title: string; body: string; is_read: boolean; created_at: string };
 
 const asNumber = (value: number | string | null | undefined) => Number(value ?? 0);
-export const money = (value: number | string | null | undefined, currency = 'INR') => new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: 0 }).format(asNumber(value));
-export const moneyExact = (value: number | string | null | undefined, currency = 'INR') => new Intl.NumberFormat('en-IN', { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(asNumber(value));
-export const isoToday = () => new Date().toISOString().slice(0, 10);
-export const monthStart = () => `${new Date().toISOString().slice(0, 7)}-01`;
+export const DEFAULT_CURRENCY = 'USD';
+const localeForCurrency = (currency: string) => currency.toUpperCase() === 'INR' ? 'en-IN' : 'en-US';
+export const money = (value: number | string | null | undefined, currency = DEFAULT_CURRENCY) => new Intl.NumberFormat(localeForCurrency(currency), { style: 'currency', currency, maximumFractionDigits: 0 }).format(asNumber(value));
+export const moneyExact = (value: number | string | null | undefined, currency = DEFAULT_CURRENCY) => new Intl.NumberFormat(localeForCurrency(currency), { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(asNumber(value));
+const localDatePart = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+export const isoToday = () => localDatePart(new Date());
+export const monthStart = () => `${isoToday().slice(0, 7)}-01`;
 export const asMoneyString = (value: string) => {
   const normalized = value.replace(/,/g, '').trim();
   if (!normalized || !Number.isFinite(Number(normalized))) return '0.00';
@@ -83,7 +86,7 @@ export async function loadFinanceData(userId: string) {
 
 export async function seedFinanceDefaults(userId: string, fullName: string) {
   if (!supabase) return;
-  await supabase.from('finance_profiles').upsert({ user_id: userId, full_name: fullName || 'Finance owner', default_currency: 'INR' });
+  await supabase.from('finance_profiles').upsert({ user_id: userId, full_name: fullName || 'Finance owner', default_currency: DEFAULT_CURRENCY });
   const { count } = await supabase.from('finance_categories').select('id', { count: 'exact', head: true }).eq('user_id', userId);
   if (!count) {
     await supabase.from('finance_categories').insert([

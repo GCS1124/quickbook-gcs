@@ -9,6 +9,8 @@ gcs-books-site.tar.gz
 .vinext/
 .wrangler/
 .playwright-mcp/
+.playwright-cli/
+output/playwright/
 next-env.d.ts
 gcsrvllc-home.png
 finance-mobile-dashboard.png
