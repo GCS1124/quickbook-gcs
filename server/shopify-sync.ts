@@ -307,6 +307,15 @@ function parseCliJson(output: string): GraphQLResponse {
   throw new Error('Shopify CLI returned an unreadable response. Run the CLI command directly to check its authentication state.');
 }
 
+function normalizeCliStore(value: string) {
+  const normalized = value.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+  if (normalized.endsWith('.myshopify.com')) {
+    try { return normalizeStoreDomain(normalized); } catch { return null; }
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) return null;
+  try { return normalizeStoreDomain(`${normalized}.myshopify.com`); } catch { return null; }
+}
+
 function runCli(env: ShopifySyncEnv, args: string[], timeoutMs: number) {
   const command = env.SHOPIFY_CLI_COMMAND?.trim() || 'shopify';
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
@@ -344,6 +353,22 @@ function runCli(env: ShopifySyncEnv, args: string[], timeoutMs: number) {
       resolve({ stdout, stderr });
     });
   });
+}
+
+export async function listAuthenticatedShopifyStores(env: ShopifySyncEnv) {
+  const result = await runCli(env, ['store', 'auth', 'list', '--json'], CLI_TIMEOUT_MS);
+  let payload: { sessions?: unknown };
+  try {
+    payload = parseCliJson(result.stdout) as GraphQLResponse & { sessions?: unknown };
+  } catch (error) {
+    throw error instanceof Error ? error : new ShopifyCliError('Shopify CLI returned an unreadable store list.');
+  }
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+  return [...new Set(sessions.flatMap((session) => {
+    if (!session || typeof session !== 'object') return [];
+    const subdomain = (session as JsonRecord).subdomain;
+    return typeof subdomain === 'string' ? [normalizeCliStore(subdomain)].filter((store): store is string => Boolean(store)) : [];
+  }))].sort();
 }
 
 async function authenticateShopifyStore(env: ShopifySyncEnv, store: string) {
@@ -575,6 +600,20 @@ export function createShopifySyncPlugin(env: ShopifySyncEnv): Plugin {
   return {
     name: 'gcs-books-shopify-cli-sync',
     configureServer(server) {
+      server.middlewares.use('/api/shopify/stores', async (request, response) => {
+        if (request.method !== 'GET') {
+          jsonResponse(response, 405, { error: 'Use GET /api/shopify/stores.' });
+          return;
+        }
+        try {
+          await requireAuthenticatedUser(request, env);
+          const stores = await listAuthenticatedShopifyStores(env);
+          jsonResponse(response, 200, { stores });
+        } catch (error) {
+          const status = error instanceof ShopifyRequestError ? error.statusCode : 502;
+          jsonResponse(response, status, { error: error instanceof Error ? error.message : 'Shopify CLI store discovery failed.' });
+        }
+      });
       server.middlewares.use('/api/shopify/import', async (request, response) => {
         if (request.method !== 'POST') {
           jsonResponse(response, 405, { error: 'Use POST /api/shopify/import.' });
