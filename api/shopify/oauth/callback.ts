@@ -27,7 +27,9 @@ export async function GET(request: Request) {
   }
 }
 
-// Expose a default Web handler for Vercel's framework-agnostic Node runtime.
-export default function handler(request: Request) {
-  return GET(request);
-}
+// Vercel's framework-agnostic Node runtime uses this Web fetch entrypoint.
+export default {
+  fetch(request: Request) {
+    return GET(request);
+  },
+};
