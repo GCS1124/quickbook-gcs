@@ -28,6 +28,62 @@
   font-size: 20px;
 }
 
+.finance-realtime-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 10px;
+  padding: 5px 8px;
+  border: 1px solid #dcebd8;
+  border-radius: 999px;
+  background: #f5faf2;
+  color: #6f9670;
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}
+
+.finance-realtime-status i {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9baaa0;
+}
+
+.finance-realtime-status.connected i {
+  background: #6fc653;
+  box-shadow: 0 0 0 3px rgba(111, 198, 83, .14);
+}
+
+.finance-realtime-status.connecting i,
+.finance-realtime-status.reconnecting i {
+  background: #e1ad63;
+  animation: realtime-pulse 1.25s infinite ease-in-out;
+}
+
+.finance-realtime-status.error {
+  border-color: #f0d2bd;
+  background: #fff4ec;
+  color: #b97655;
+}
+
+.finance-realtime-status.error i {
+  background: #df8064;
+}
+
+.finance-realtime-status.demo {
+  border-color: #e8e6cf;
+  background: #fbf9ed;
+  color: #9a9468;
+}
+
+@keyframes realtime-pulse {
+  0%, 100% { opacity: .45; transform: scale(.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
 .finance-app .top-search kbd {
   padding: 3px 6px;
   border: 1px solid var(--finance-line);
@@ -430,6 +486,174 @@
   border-radius: 5px;
   color: #6c9e65;
   font-size: 8px;
+}
+
+.import-header-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.shopify-sync-button {
+  min-height: 38px;
+  padding: 0 14px 0 10px;
+  border: 1px solid #75bd5a;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #8fe55e, #71ca4c);
+  color: #19301d;
+  box-shadow: 0 9px 22px rgba(103, 186, 70, .22);
+}
+
+.shopify-sync-button:hover {
+  border-color: #5fae4d;
+  background: linear-gradient(135deg, #9af16c, #7bd657);
+}
+
+.shopify-sync-button:disabled,
+.shopify-sync-submit:disabled {
+  cursor: wait;
+  opacity: .68;
+  transform: none;
+}
+
+.shopify-button-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .7);
+  color: #4f964b;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: -.08em;
+}
+
+.shopify-sync-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.shopify-sync-feedback.error,
+.shopify-sync-inline-error {
+  border: 1px solid #f0d2bd;
+  background: #fff3ea;
+  color: #b76c4b;
+}
+
+.shopify-sync-feedback.success {
+  border: 1px solid #d5eacb;
+  background: #f1faed;
+  color: #5b9552;
+}
+
+.shopify-sync-feedback > span,
+.shopify-sync-inline-error > span {
+  font-weight: 850;
+}
+
+.shopify-sync-feedback strong {
+  display: block;
+  color: var(--finance-ink);
+  font-size: 10px;
+}
+
+.shopify-sync-feedback p {
+  margin-top: 3px;
+  color: inherit;
+  font-size: 9px;
+}
+
+.shopify-sync-modal {
+  width: min(560px, 100%);
+}
+
+.shopify-sync-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 22px;
+  padding: 11px 12px;
+  border: 1px solid #dcebd8;
+  border-radius: 10px;
+  background: linear-gradient(100deg, #f3faef, #fbfdfb);
+}
+
+.shopify-sync-badge > div {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.shopify-sync-badge strong {
+  color: var(--finance-ink);
+  font-size: 10px;
+}
+
+.shopify-sync-badge small {
+  color: #8c9d91;
+  font-size: 8px;
+}
+
+.shopify-sync-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #70c956;
+  box-shadow: 0 0 0 4px rgba(112, 201, 86, .12);
+}
+
+.shopify-sync-select {
+  margin-top: 18px;
+}
+
+.shopify-sync-select select {
+  height: 46px;
+  border-color: #cfe3ca;
+  background: #fbfef9;
+  font-weight: 650;
+}
+
+.shopify-sync-help {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 11px 12px;
+  border-radius: 9px;
+  background: #f7faf5;
+  color: #809284;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.shopify-sync-help > span {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 1px solid #b8dbae;
+  border-radius: 50%;
+  color: #65a955;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.shopify-sync-inline-error {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .shopify-pnl-card {
@@ -849,6 +1073,51 @@
   color: #a7d19a;
 }
 
+.finance-app.dark .shopify-sync-badge,
+.finance-app.dark .shopify-sync-help {
+  border-color: #38523b;
+  background: #1c3022;
+}
+
+.finance-app.dark .finance-realtime-status {
+  border-color: #38523b;
+  background: #1c3022;
+  color: #9aaf9e;
+}
+
+.finance-app.dark .finance-realtime-status.error {
+  border-color: #6a4c3c;
+  background: #33251f;
+  color: #e0a486;
+}
+
+.finance-app.dark .finance-realtime-status.demo {
+  border-color: #5c583b;
+  background: #302f20;
+  color: #d1c98e;
+}
+
+.finance-app.dark .shopify-sync-badge small,
+.finance-app.dark .shopify-sync-help {
+  color: #9aaf9e;
+}
+
+.finance-app.dark .shopify-sync-select select {
+  border-color: #426143;
+  background: #1a2c20;
+}
+
+.finance-app.dark .shopify-sync-feedback.success {
+  border-color: #426541;
+  background: #1d3423;
+}
+
+.finance-app.dark .shopify-sync-feedback.error,
+.finance-app.dark .shopify-sync-inline-error {
+  border-color: #6a4c3c;
+  background: #33251f;
+}
+
 .finance-app.dark .pnl-status.ready,
 .finance-app.dark .shopify-requirement.is-complete .requirement-state {
   background: #294a2b;
@@ -908,6 +1177,18 @@
     overflow: hidden;
     font-size: 15px;
     line-height: 1.08;
+    text-overflow: ellipsis;
+  }
+
+  .finance-realtime-status {
+    margin-left: 6px;
+    padding: 4px 6px;
+    font-size: 7px;
+  }
+
+  .finance-realtime-status:not(.connected) {
+    max-width: 94px;
+    overflow: hidden;
     text-overflow: ellipsis;
   }
 
@@ -997,6 +1278,25 @@
 
   .requirement-footer .import-template-action {
     width: 100%;
+  }
+
+  .import-header-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .shopify-sync-button {
+    width: 100%;
+  }
+
+  .import-header-actions .import-source-badge {
+    align-self: stretch;
+  }
+
+  .shopify-sync-modal {
+    max-height: calc(100vh - 30px);
+    overflow-y: auto;
   }
 }
 

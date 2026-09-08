@@ -3,8 +3,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 /**
  * This project is a Vite SPA, so the browser client is the correct SSR-aware
- * integration point. It keeps auth in cookies and refreshes sessions without
- * pretending that a Next.js server or middleware exists in this runtime.
+ * integration point. It persists auth in browser storage and refreshes sessions
+ * without pretending that a Next.js server or middleware exists in this runtime.
  */
 const runtimeEnv = import.meta.env as ImportMetaEnv & {
   NEXT_PUBLIC_SUPABASE_URL?: string;

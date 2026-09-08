@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseInitializationError, supabaseProjectRef } from './lib/supabase';
+import { connectFinanceRealtime, type FinanceRealtimeStatus } from './lib/realtime';
 import {
   asMoneyString,
   DEFAULT_CURRENCY,
@@ -54,6 +55,8 @@ type FinanceData = {
 };
 
 type TransactionForm = { type: 'expense' | 'income' | 'transfer'; amount: string; accountId: string; transferAccountId: string; categoryId: string; merchant: string; description: string; transactionDate: string; tags: string };
+type ShopifyImportPeriod = 'last_month' | 'last_3_months' | 'last_6_months' | 'last_1_year' | 'lifetime';
+type ShopifySyncResponse = { error?: string; range?: { label?: string | null }; files?: { name: string; content: string; source: string; rows: number }[]; warnings?: string[] };
 
 const views: { id: View; label: string; icon: string; group: string }[] = [
   { id: 'overview', label: 'Overview', icon: '◈', group: 'Workspace' },
@@ -85,6 +88,20 @@ const sourceKindLabels: Record<ImportSourceKind, string> = {
   payouts: 'Payout activity',
 };
 const sourceKindLabel = (kind: ImportSourceKind) => sourceKindLabels[kind] || 'Shopify export';
+const SHOPIFY_IMPORT_PERIODS: { value: ShopifyImportPeriod; label: string; description: string }[] = [
+  { value: 'last_month', label: 'Last month', description: 'Previous complete calendar month' },
+  { value: 'last_3_months', label: 'Last 3 months', description: 'Previous 3 complete calendar months' },
+  { value: 'last_6_months', label: 'Last 6 months', description: 'Previous 6 complete calendar months' },
+  { value: 'last_1_year', label: 'Last 1 year', description: 'Previous 12 complete calendar months' },
+  { value: 'lifetime', label: 'Lifetime', description: 'Everything available in Shopify' },
+];
+const realtimeStatusLabels: Record<FinanceRealtimeStatus, string> = {
+  connecting: 'Connecting live data',
+  connected: 'Live updates on',
+  reconnecting: 'Reconnecting live data',
+  error: 'Live updates unavailable',
+  offline: 'Live updates offline',
+};
 const downloadOperatingExpenseTemplate = () => {
   const csv = ['Date,Category,Description,Amount,Currency', '2026-09-01,Shopify apps,Example subscription,49.00,USD', '2026-09-02,Advertising,Example campaign,125.00,USD'].join('\n');
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
@@ -144,8 +161,8 @@ const readStoredView = (): View => {
     return views.some((item) => item.id === stored) ? stored as View : 'overview';
   } catch { return 'overview'; }
 };
-const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number) => new Promise<T>((resolve, reject) => {
-  const timer = window.setTimeout(() => reject(new Error('The Supabase connection timed out.')), timeoutMs);
+const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number, timeoutMessage = 'The Supabase connection timed out.') => new Promise<T>((resolve, reject) => {
+  const timer = window.setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
   promise.then((value) => { window.clearTimeout(timer); resolve(value); }, (error) => { window.clearTimeout(timer); reject(error); });
 });
 const AUTH_EMAIL_COOLDOWN_KEY = 'gcs-books-auth-email-cooldown-until';
@@ -195,6 +212,11 @@ export default function App() {
   const [importLoading, setImportLoading] = useState(false);
   const [importError, setImportError] = useState('');
   const [importMessage, setImportMessage] = useState('');
+  const [shopifySyncLoading, setShopifySyncLoading] = useState(false);
+  const [shopifySyncError, setShopifySyncError] = useState('');
+  const [shopifySyncMessage, setShopifySyncMessage] = useState('');
+  const [realtimeStatus, setRealtimeStatus] = useState<FinanceRealtimeStatus>('offline');
+  const [realtimeMessage, setRealtimeMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [dataError, setDataError] = useState('');
   const [darkMode, setDarkMode] = useState(() => readStoredBoolean('gcs-books-dark-mode', false));
@@ -218,8 +240,9 @@ export default function App() {
   const currentUserId = session?.user.id;
   const globalSearchRef = useRef<HTMLInputElement>(null);
 
-  const refreshData = useCallback(async (userId: string) => {
-    setLoading(true);
+  const refreshData = useCallback(async (userId: string, options: { background?: boolean } = {}) => {
+    const background = options.background === true;
+    if (!background) setLoading(true);
     setDataError('');
     try {
       let result = await withTimeout(loadFinanceData(userId), 12000);
@@ -237,7 +260,7 @@ export default function App() {
     } catch (error) {
       setDataError(describeError(error, 'We could not load your finance data.'));
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }, [authName, session?.user.user_metadata]);
 
@@ -275,6 +298,45 @@ export default function App() {
   }, []);
 
   useEffect(() => { if (session?.user.id && !demoMode) void refreshData(session.user.id); }, [demoMode, refreshData, session?.user.id]);
+
+  useEffect(() => {
+    if (!supabase || !session?.user.id || demoMode) {
+      setRealtimeStatus('offline');
+      setRealtimeMessage(demoMode ? 'Demo data is local to this browser.' : 'Sign in to enable live updates.');
+      return;
+    }
+
+    const userId = session.user.id;
+    let disposed = false;
+    let refreshTimer: number | undefined;
+    setRealtimeStatus('connecting');
+    setRealtimeMessage('');
+
+    const scheduleRefresh = () => {
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = undefined;
+        if (!disposed) void refreshData(userId, { background: true });
+      }, 350);
+    };
+
+    const disconnect = connectFinanceRealtime(
+      supabase,
+      userId,
+      ({ status, message }) => {
+        if (disposed) return;
+        setRealtimeStatus(status);
+        setRealtimeMessage(message || '');
+      },
+      scheduleRefresh,
+    );
+
+    return () => {
+      disposed = true;
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      disconnect();
+    };
+  }, [demoMode, refreshData, session?.user.id]);
 
   useEffect(() => {
     try { window.localStorage.setItem('gcs-books-view', view); } catch { /* storage can be disabled */ }
@@ -409,10 +471,10 @@ export default function App() {
     if (supabase && session) {
       try { await withTimeout(supabase.auth.signOut(), 7000); } catch { /* clear local state even if the network is unavailable */ }
     }
-    setSession(null); setDemoMode(false); setView('overview'); setData(emptyData); setImportedData(emptyImportData); setImportError(''); setImportMessage(''); showToast('You have been signed out.');
+    setSession(null); setDemoMode(false); setView('overview'); setData(emptyData); setImportedData(emptyImportData); setImportError(''); setImportMessage(''); setShopifySyncError(''); setShopifySyncMessage(''); showToast('You have been signed out.');
   }
 
-  function startDemo() { setDemoMode(true); setImportedData(emptyImportData); setImportError(''); setImportMessage(''); setAuthMessage(''); setAuthError(''); setDataError(''); setView('overview'); }
+  function startDemo() { setDemoMode(true); setImportedData(emptyImportData); setImportError(''); setImportMessage(''); setShopifySyncError(''); setShopifySyncMessage(''); setAuthMessage(''); setAuthError(''); setDataError(''); setView('overview'); }
 
   async function handleImportFiles(files: File[]): Promise<boolean> {
     if (!files.length) return false;
@@ -508,6 +570,45 @@ export default function App() {
       return false;
     } finally {
       setImportLoading(false);
+    }
+  }
+
+  async function handleShopifyImport(period: ShopifyImportPeriod): Promise<boolean> {
+    setShopifySyncLoading(true);
+    setShopifySyncError('');
+    setShopifySyncMessage('');
+    const authClient = supabase;
+    const currentSession = session;
+    if (demoMode || !authClient || !currentSession) {
+      setShopifySyncError('Sign in to your GCS Books workspace to connect Shopify. Demo imports stay local to this browser.');
+      setShopifySyncLoading(false);
+      return false;
+    }
+    try {
+      const { data: { session: activeSession }, error: sessionError } = await withTimeout(authClient.auth.getSession(), 7000, 'Supabase session lookup timed out. Sign in again and retry.');
+      if (sessionError) throw sessionError;
+      if (!activeSession?.access_token) throw new Error('Your Supabase session is no longer valid. Sign in again and retry the Shopify import.');
+      const response = await withTimeout(fetch('/api/shopify/import', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${activeSession.access_token}` },
+        body: JSON.stringify({ period }),
+      }), 900_000, 'Shopify authorization/import timed out. Finish the Shopify approval flow or try again.');
+      const payload = await response.json().catch(() => ({})) as ShopifySyncResponse;
+      if (!response.ok) throw new Error(payload.error || 'Shopify import failed.');
+      const files = (payload.files || []).map((file) => new File([file.content], file.name, { type: 'text/csv' }));
+      if (!files.length) throw new Error('Shopify returned no importable files for that period.');
+      const imported = await handleImportFiles(files);
+      if (!imported) return false;
+      const sourceSummary = payload.files?.map((file) => `${file.rows.toLocaleString()} ${file.source.replace('shopify_', '').replace('_', ' ')}`).join(' · ') || 'Shopify records';
+      const warningSummary = payload.warnings?.length ? ` ${payload.warnings.join(' ')}` : '';
+      setShopifySyncMessage(`Shopify sync complete for ${payload.range?.label || period}: ${sourceSummary}.${warningSummary}`);
+      return true;
+    } catch (error) {
+      setShopifySyncError(describeError(error, 'Shopify import failed. Check the CLI connection and try again.'));
+      return false;
+    } finally {
+      setShopifySyncLoading(false);
     }
   }
 
@@ -716,12 +817,13 @@ export default function App() {
   if (loading && !demoMode) return <LoadingScreen />;
 
   const currentView = views.find((item) => item.id === view) || views[0];
+  const realtimeLabel = demoMode ? 'Demo data only' : realtimeStatusLabels[realtimeStatus];
   return (
     <div className={`finance-app ${darkMode ? 'dark' : ''}`}>
       <Sidebar view={view} setView={(next) => { setView(next); setSidebarOpen(false); }} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onAssistant={() => setAssistantOpen(true)} onLogout={logout} userName={userName} demoMode={demoMode} supabaseProjectRef={supabaseProjectRef} billCount={activeData.recurring.filter((bill) => !bill.is_paid).length} />
       <div className="finance-main">
-        <header className="finance-topbar"><div className="finance-topbar-left"><button type="button" className="mobile-nav-button" onClick={() => setSidebarOpen(true)} aria-label="Open navigation">☰</button><div><h1>{view === 'overview' ? `Good morning, ${userName}` : currentView.label}</h1></div></div><div className="finance-topbar-actions"><div className="top-search"><span>⌕</span><input ref={globalSearchRef} aria-label="Search transactions" placeholder="Search your books" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && search.trim()) setView('transactions'); }} /><kbd>⌘K</kbd></div><button type="button" className="top-icon-button" aria-label="Toggle dark mode" onClick={() => setDarkMode((current) => !current)}>{darkMode ? '☼' : '☾'}</button><button type="button" className="top-icon-button notification-trigger" aria-label="Open notifications" onClick={() => setNotificationsOpen((current) => !current)}>♢{activeData.notifications.some((item) => !item.is_read) && <i />}</button><div className="finance-avatar">{userName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}</div></div>{notificationsOpen && <NotificationPanel notifications={activeData.notifications} onClose={() => setNotificationsOpen(false)} onMarkAllRead={markNotificationsRead} />}</header>
-        <main className="finance-content"><div className="content-toolbar"><div><span className="content-eyebrow">{view === 'overview' ? longDateLabel(today) : 'Your financial command center'}</span>{view !== 'overview' && <p className="content-subtitle">Everything you need to make calmer money decisions.</p>}</div><div className="content-actions"><button type="button" className="secondary-button" onClick={() => setAssistantOpen(true)}><span>✦</span> Ask assistant</button><button type="button" className="primary-button" onClick={() => { setTransactionForm({ ...newTransaction(), accountId: activeData.accounts[0]?.id || '', categoryId: activeData.categories.find((item) => item.kind !== 'income')?.id || '' }); setModal('transaction'); }}>+ Add transaction</button></div></div>{dataError && <div className="data-error"><span>!</span>{dataError}<button type="button" onClick={() => currentUserId && refreshData(currentUserId)}>Retry</button></div>}<ImportContextRibbon analysis={importedAnalysis} batches={importedData.batches} onOpen={() => setView('imports')} />{renderView(view, activeData, stats, categorySpend, smartInsights, filteredTransactions, search, transactionFilter, transactionSourceFilter, setSearch, setTransactionFilter, setTransactionSourceFilter, setView, setModal, setTransactionForm, markBillPaid, setConfirmDelete, setConfirmImportDelete, showToast, exportCsv, importedData, handleImportFiles, importLoading, importError, importMessage)}</main>
+        <header className="finance-topbar"><div className="finance-topbar-left"><button type="button" className="mobile-nav-button" onClick={() => setSidebarOpen(true)} aria-label="Open navigation">☰</button><div><h1>{view === 'overview' ? `Good morning, ${userName}` : currentView.label}</h1><span className={`finance-realtime-status ${demoMode ? 'demo' : realtimeStatus}`} role="status" title={realtimeMessage || realtimeLabel}><i aria-hidden="true" />{realtimeLabel}</span></div></div><div className="finance-topbar-actions"><div className="top-search"><span>⌕</span><input ref={globalSearchRef} aria-label="Search transactions" placeholder="Search your books" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && search.trim()) setView('transactions'); }} /><kbd>⌘K</kbd></div><button type="button" className="top-icon-button" aria-label="Toggle dark mode" onClick={() => setDarkMode((current) => !current)}>{darkMode ? '☼' : '☾'}</button><button type="button" className="top-icon-button notification-trigger" aria-label="Open notifications" onClick={() => setNotificationsOpen((current) => !current)}>♢{activeData.notifications.some((item) => !item.is_read) && <i />}</button><div className="finance-avatar">{userName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}</div></div>{notificationsOpen && <NotificationPanel notifications={activeData.notifications} onClose={() => setNotificationsOpen(false)} onMarkAllRead={markNotificationsRead} />}</header>
+        <main className="finance-content"><div className="content-toolbar"><div><span className="content-eyebrow">{view === 'overview' ? longDateLabel(today) : 'Your financial command center'}</span>{view !== 'overview' && <p className="content-subtitle">Everything you need to make calmer money decisions.</p>}</div><div className="content-actions"><button type="button" className="secondary-button" onClick={() => setAssistantOpen(true)}><span>✦</span> Ask assistant</button><button type="button" className="primary-button" onClick={() => { setTransactionForm({ ...newTransaction(), accountId: activeData.accounts[0]?.id || '', categoryId: activeData.categories.find((item) => item.kind !== 'income')?.id || '' }); setModal('transaction'); }}>+ Add transaction</button></div></div>{dataError && <div className="data-error"><span>!</span>{dataError}<button type="button" onClick={() => currentUserId && refreshData(currentUserId)}>Retry</button></div>}<ImportContextRibbon analysis={importedAnalysis} batches={importedData.batches} onOpen={() => setView('imports')} />{renderView(view, activeData, stats, categorySpend, smartInsights, filteredTransactions, search, transactionFilter, transactionSourceFilter, setSearch, setTransactionFilter, setTransactionSourceFilter, setView, setModal, setTransactionForm, markBillPaid, setConfirmDelete, setConfirmImportDelete, showToast, exportCsv, importedData, handleImportFiles, importLoading, importError, importMessage, handleShopifyImport, shopifySyncLoading, shopifySyncError, shopifySyncMessage)}</main>
       </div>
       {assistantOpen && <AssistantPanel question={assistantQuestion} setQuestion={setAssistantQuestion} answer={assistantAnswer} onAsk={answerAssistant} onClose={() => setAssistantOpen(false)} />}
       {modal === 'transaction' && <TransactionModal form={transactionForm} setForm={setTransactionForm} accounts={activeData.accounts} categories={activeData.categories} onSubmit={addTransaction} onClose={() => setModal(null)} />}
@@ -739,7 +841,7 @@ export default function App() {
   );
 }
 
-function renderView(view: View, data: FinanceData, stats: { balance: number; income: number; expenses: number; savings: number; investmentValue: number; savingsRate: number }, categorySpend: { name: string; color: string; total: number }[], insights: { kind: string; title: string; body: string; icon: string }[], filteredTransactions: FinanceTransaction[], search: string, transactionFilter: 'all' | 'income' | 'expense' | 'transfer', transactionSourceFilter: TransactionSourceFilter, setSearch: (value: string) => void, setTransactionFilter: (value: 'all' | 'income' | 'expense' | 'transfer') => void, setTransactionSourceFilter: (value: TransactionSourceFilter) => void, setView: (value: View) => void, setModal: (value: Modal) => void, setTransactionForm: (value: TransactionForm) => void, markBillPaid: (bill: RecurringPayment) => void, setConfirmDelete: (value: string | null) => void, setConfirmImportDelete: (value: FinanceImportBatch | null) => void, showToast: (value: string) => void, exportCsv: () => void, importedData: ImportData, onImportFiles: (files: File[]) => Promise<boolean>, importLoading: boolean, importError: string, importMessage: string) {
+function renderView(view: View, data: FinanceData, stats: { balance: number; income: number; expenses: number; savings: number; investmentValue: number; savingsRate: number }, categorySpend: { name: string; color: string; total: number }[], insights: { kind: string; title: string; body: string; icon: string }[], filteredTransactions: FinanceTransaction[], search: string, transactionFilter: 'all' | 'income' | 'expense' | 'transfer', transactionSourceFilter: TransactionSourceFilter, setSearch: (value: string) => void, setTransactionFilter: (value: 'all' | 'income' | 'expense' | 'transfer') => void, setTransactionSourceFilter: (value: TransactionSourceFilter) => void, setView: (value: View) => void, setModal: (value: Modal) => void, setTransactionForm: (value: TransactionForm) => void, markBillPaid: (bill: RecurringPayment) => void, setConfirmDelete: (value: string | null) => void, setConfirmImportDelete: (value: FinanceImportBatch | null) => void, showToast: (value: string) => void, exportCsv: () => void, importedData: ImportData, onImportFiles: (files: File[]) => Promise<boolean>, importLoading: boolean, importError: string, importMessage: string, onShopifyImport: (period: ShopifyImportPeriod) => Promise<boolean>, shopifySyncLoading: boolean, shopifySyncError: string, shopifySyncMessage: string) {
   switch (view) {
     case 'transactions': return <TransactionsView data={data} transactions={filteredTransactions} search={search} filter={transactionFilter} sourceFilter={transactionSourceFilter} setSearch={setSearch} setFilter={setTransactionFilter} setSourceFilter={setTransactionSourceFilter} setModal={setModal} setTransactionForm={setTransactionForm} setConfirmDelete={setConfirmDelete} />;
     case 'accounts': return <AccountsView data={data} setModal={setModal} />;
@@ -751,7 +853,7 @@ function renderView(view: View, data: FinanceData, stats: { balance: number; inc
     case 'lending': return <LendingView data={data} setModal={setModal} />;
     case 'reports': return <ReportsView data={data} importedData={importedData} exportCsv={exportCsv} setView={setView} />;
     case 'calendar': return <CalendarView data={data} importedData={importedData} />;
-    case 'imports': return <ImportCenterView importedData={importedData} onImportFiles={onImportFiles} onDeleteBatch={setConfirmImportDelete} loading={importLoading} error={importError} message={importMessage} />;
+    case 'imports': return <ImportCenterView importedData={importedData} onImportFiles={onImportFiles} onShopifyImport={onShopifyImport} onDeleteBatch={setConfirmImportDelete} loading={importLoading} error={importError} message={importMessage} shopifySyncLoading={shopifySyncLoading} shopifySyncError={shopifySyncError} shopifySyncMessage={shopifySyncMessage} />;
     default: return <OverviewView data={data} stats={stats} categorySpend={categorySpend} insights={insights} setView={setView} setModal={setModal} />;
   }
 }
@@ -870,10 +972,12 @@ function ReportsView({ data, importedData, exportCsv, setView }: { data: Finance
   </div>;
 }
 
-function ImportCenterView({ importedData, onImportFiles, onDeleteBatch, loading, error, message }: { importedData: ImportData; onImportFiles: (files: File[]) => Promise<boolean>; onDeleteBatch: (batch: FinanceImportBatch) => void; loading: boolean; error: string; message: string }) {
+function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onDeleteBatch, loading, error, message, shopifySyncLoading, shopifySyncError, shopifySyncMessage }: { importedData: ImportData; onImportFiles: (files: File[]) => Promise<boolean>; onShopifyImport: (period: ShopifyImportPeriod) => Promise<boolean>; onDeleteBatch: (batch: FinanceImportBatch) => void; loading: boolean; error: string; message: string; shopifySyncLoading: boolean; shopifySyncError: string; shopifySyncMessage: string }) {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [selectionError, setSelectionError] = useState('');
+  const [shopifyImportOpen, setShopifyImportOpen] = useState(false);
+  const [shopifyPeriod, setShopifyPeriod] = useState<ShopifyImportPeriod>('last_month');
   const analysis = analyzeImportData(importedData);
   const currency = analysis.currency || 'USD';
   const loadedKinds = new Set<ImportSourceKind>(importedData.batches.filter((batch) => batch.status === 'completed').map((batch) => batch.source_kind === 'payment_transactions' ? 'shopify_payment_transactions' : batch.source_kind));
@@ -904,8 +1008,11 @@ function ImportCenterView({ importedData, onImportFiles, onDeleteBatch, loading,
   const payoutRows = importedData.payouts.slice(0, 20);
   const reviewCount = importedData.batches.reduce((sum, batch) => sum + (batch.review_count || 0), 0);
   const requirementStatus = analysis.pnlReady ? 'Complete' : connectedRequirements + '/5 connected';
+  const syncShopify = async () => { const imported = await onShopifyImport(shopifyPeriod); if (imported) setShopifyImportOpen(false); };
   return <div className="view-stack import-view">
-    <section className="module-header"><div><span className="content-eyebrow">Shopify data, connected end to end</span><h2>Shopify import center</h2><p>Upload the complete export pack to calculate a holistic profit and loss, reconcile payouts, and connect source data to every view.</p></div><div className="import-source-badge"><span>5 FILE PACK</span><small>{requirementStatus}</small></div></section>
+    <section className="module-header"><div><span className="content-eyebrow">Shopify data, connected end to end</span><h2>Shopify import center</h2><p>Sync live Shopify records for a reporting period or upload the complete export pack for a holistic profit and loss.</p></div><div className="import-header-actions"><button type="button" className="primary-button shopify-sync-button" onClick={() => setShopifyImportOpen(true)} disabled={shopifySyncLoading}><span className="shopify-button-mark">S</span>{shopifySyncLoading ? 'Syncing Shopify…' : 'Import from Shopify ↗'}</button><div className="import-source-badge"><span>5 FILE PACK</span><small>{requirementStatus}</small></div></div></section>
+    {shopifySyncError && <div className="shopify-sync-feedback error" role="alert"><span>!</span><div><strong>Shopify sync needs attention</strong><p>{shopifySyncError}</p></div></div>}
+    {shopifySyncMessage && <div className="shopify-sync-feedback success" role="status"><span>✓</span><div><strong>Shopify sync complete</strong><p>{shopifySyncMessage}</p></div></div>}
     <section className="finance-card shopify-requirements"><CardHeading eyebrow="Required for a trustworthy P&L" title="Connect the five Shopify exports" /><p className="requirements-intro">Orders explain revenue, products explain cost of goods, payments explain fees, payouts explain cash timing, and operating expenses complete the picture.</p><div className="shopify-requirement-list">{SHOPIFY_EXPORT_REQUIREMENTS.map((requirement, index) => {
       const complete = loadedKinds.has(requirement.kind);
       return <div className={'shopify-requirement ' + (complete ? 'is-complete' : '')} key={requirement.kind}><span className="requirement-index">{complete ? '✓' : String(index + 1).padStart(2, '0')}</span><div className="requirement-copy"><strong>{requirement.label}</strong><p>{requirement.description}</p><small className="requirement-path">{requirement.exportPath}</small></div><span className="requirement-state">{complete ? 'Connected' : 'Required'}</span></div>;
@@ -920,6 +1027,7 @@ function ImportCenterView({ importedData, onImportFiles, onDeleteBatch, loading,
       <section className="finance-card"><div className="import-table-heading"><div><span className="content-eyebrow">Settlement detail</span><h3>Payout activity</h3><p>Bank references and settlement components are preserved for reconciliation.</p></div><div className="import-table-meta">{analysis.payoutRows} payouts</div></div><div className="import-table payout-table"><div className="import-table-head"><span>Date</span><span>Status / bank reference</span><span>Charges</span><span>Refunds</span><span>Fees</span><span>Total</span></div>{payoutRows.map((row) => <div className="import-table-row" key={row.source_key}><span>{dateLabel(row.payout_date)}</span><span><strong>{row.status}</strong><small>{row.bank_reference}</small></span><span>{moneyExact(row.charges, row.currency)}</span><span>{moneyExact(row.refunds, row.currency)}</span><span>{moneyExact(row.fees, row.currency)}</span><strong>{moneyExact(row.total, row.currency)}</strong></div>)}{!payoutRows.length && <EmptyState title="No payout activity yet" body="Import the Payout activity export or text-based PDF to see settlement rows here." />}</div></section>
     </>}
     {importedData.batches.length > 0 && <section className="finance-card"><CardHeading eyebrow="Import history" title="Shopify source files" />{importedData.batches.map((batch) => <div className="import-history-row" key={batch.id}><span className="file-type-pill">{batch.file_type.toUpperCase()}</span><div><strong>{batch.file_name}</strong><small>{sourceKindLabel(batch.source_kind)} · {dateLabel(batch.imported_at.slice(0, 10))}</small></div><span className="import-history-status">{batch.imported_count} imported{batch.duplicate_count ? ' · ' + batch.duplicate_count + ' skipped' : ''}{batch.review_count ? ' · ' + batch.review_count + ' review' : ''}</span><button className="import-history-delete" type="button" aria-label={'Delete imported file ' + batch.file_name} onClick={() => onDeleteBatch(batch)}>Delete</button></div>)}</section>}
+    {shopifyImportOpen && <div className="modal-backdrop" onClick={() => { if (!shopifySyncLoading) setShopifyImportOpen(false); }}><div className="finance-modal shopify-sync-modal" role="dialog" aria-modal="true" aria-labelledby="shopify-sync-title" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="content-eyebrow">Live Shopify connection</span><h2 id="shopify-sync-title">Import from Shopify</h2><p>Choose a reporting period and we’ll pull the source data into the same P&L, ledger, reports, analytics, and calendar views.</p></div><button type="button" aria-label="Close Shopify import" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>×</button></div><div className="shopify-sync-badge"><span className="shopify-button-mark">S</span><div><strong>Shopify CLI sync</strong><small>Authorizes on first use for this GCS Books user if needed · no token is stored in the browser</small></div><span className="shopify-sync-live-dot" /></div><label className="modal-field shopify-sync-select"><span>Time period</span><select aria-label="Shopify import time period" value={shopifyPeriod} onChange={(event) => setShopifyPeriod(event.target.value as ShopifyImportPeriod)} disabled={shopifySyncLoading}>{SHOPIFY_IMPORT_PERIODS.map((period) => <option value={period.value} key={period.value}>{period.label} · {period.description}</option>)}</select></label><div className="shopify-sync-help"><span>i</span><p>Orders, product costs, payments, and payouts are synced for the selected period. On first use for this GCS Books user, Shopify CLI authorization opens automatically and the import continues after approval. Shopify cannot expose every merchant cost, so add apps, ads, fulfilment, payroll, and other operating expenses with the template to complete the holistic P&L.</p></div>{shopifySyncError && <div className="shopify-sync-inline-error" role="alert"><span>!</span>{shopifySyncError}</div>}<div className="modal-actions"><button className="secondary-button" type="button" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>Cancel</button><button className="primary-button shopify-sync-submit" type="button" disabled={shopifySyncLoading} onClick={syncShopify}>{shopifySyncLoading ? 'Syncing Shopify…' : 'Start Shopify import ↗'}</button></div></div></div>}
   </div>;
 }
 

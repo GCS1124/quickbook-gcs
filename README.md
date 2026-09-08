@@ -11,11 +11,30 @@ npm run dev
 
 Copy `.env.example` to `.env.local` and keep the Supabase URL and publishable key aligned with the active GCS Books project. This Vite app accepts both `VITE_SUPABASE_*` and the `NEXT_PUBLIC_SUPABASE_*` aliases from Supabase's Next.js setup instructions. Never put a `service_role` key in browser environment variables.
 
-The Supabase integration lives in `src/lib/supabase.ts`. Because this repository is a browser-only Vite SPA, it uses `createBrowserClient` with persisted sessions, URL detection, and automatic token refresh. Next.js server helpers and `middleware.ts` are intentionally not added: they require a Next runtime and would not run in this application. The connected project already has the finance tables, foreign keys, and authenticated-only RLS policies used by the app.
+The Supabase integration lives in `src/lib/supabase.ts`. Because this repository is a browser-only Vite SPA, it uses `createBrowserClient` with persisted sessions, URL detection, and automatic token refresh. After a user session is available, `src/lib/realtime.ts` opens one user-scoped Postgres Changes channel for all finance tables and background-refreshes every view when data changes. The header badge shows whether live updates are connected; demo mode correctly stays local-only. Next.js server helpers and `middleware.ts` are intentionally not added: they require a Next runtime and would not run in this application. The connected project already has the finance tables, foreign keys, authenticated-only RLS policies, and `supabase_realtime` publication entries used by the app.
+
+The realtime publication is kept reproducible in `supabase/migrations/20260908110000_enable_finance_realtime.sql`. RLS still controls which user-scoped rows a signed-in session can receive; enabling publication does not make finance data public.
 
 ## Shopify import workflow
 
 Open Shopify import center from the sidebar or the connected-data ribbon visible on every workspace page. For a holistic P&L, export the same period from Shopify and upload these five sources together:
+
+### Live Shopify CLI import
+
+The import center now includes **Import from Shopify**. It asks only for the reporting period, then the Vite server runs Shopify CLI's authenticated Admin GraphQL queries for orders, product costs, Shopify Payments transactions, and payouts. The returned records are converted into the same source-aware import pipeline used by uploaded files, so they flow through the ledger, P&L, reports, analytics, and calendar.
+
+This bridge is intentionally server-side: no Admin token is sent to the browser. It is available while running the Vite development server. The request must come from a valid signed-in Supabase user; the server verifies that user before starting any Shopify command. Configure the local store domain once; the app handles CLI authorization on first use for that user:
+
+1. Copy `.env.example` to `.env.local` and set `SHOPIFY_STORE_DOMAIN=your-store.myshopify.com`.
+2. Start the app with `npm run dev`, sign in, open Shopify import center, click **Import from Shopify**, and choose **Last month**, **Last 3 months**, **Last 6 months**, **Last 1 year**, or **Lifetime**. If this user/store pair is not authorized yet, the button starts `shopify store auth`, opens Shopify’s approval page, and continues the import after approval. There is no separate pre-auth command.
+
+The first-use authorization requests `read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments`. Set `SHOPIFY_CLI_SCOPES` only if the store’s approved permissions need a deliberate override. The server keeps the active CLI session associated with the signed-in user and serializes user switches so one user’s import cannot run concurrently on another user’s CLI session. See the official [store auth](https://shopify.dev/docs/api/shopify-cli/store/store-auth) and [store execute](https://shopify.dev/docs/api/shopify-cli/store/store-execute) references.
+
+The first four options use complete calendar months. Lifetime reads all data available to the authenticated CLI session; historical orders older than Shopify's default 60-day window require the `read_all_orders` permission. Product costs also require access to product costs in Shopify. If the store does not use Shopify Payments, the sync keeps orders and products and explains why payments or payouts are unavailable.
+
+Shopify does not expose every merchant operating cost through the Admin API. Add apps, ads, fulfilment, payroll, and other costs with the supplied operating-expense template to turn the imported sales and cost data into a complete operating P&L.
+
+### Manual export pack
 
 1. Orders → Export → All orders → All information
 2. Products → Export → All products, with `Variant SKU` and `Cost per item`
