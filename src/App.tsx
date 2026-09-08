@@ -1056,12 +1056,12 @@ function ImportCenterView({ shopifyUserId, importedData, onImportFiles, onShopif
       ? 'Shopify native server connection'
       : 'Shopify secure connection';
   const shopifyConnectionSubcopy = shopifyMode === 'cli'
-    ? 'Authorizes on first use for this GCS Books user · no token is stored in the browser'
+    ? 'Remembers the selected store for this GCS Books user · no token is stored in the browser'
     : shopifyMode === 'client_credentials'
       ? 'Runs on Vercel without browser approval · credentials and tokens stay server-side'
       : 'Connects this GCS Books user on first use · the token is encrypted server-side';
   const shopifyConnectionHelp = shopifyMode === 'cli'
-    ? 'Orders, product costs, payments, and payouts are synced for the selected period. On first use for this GCS Books user, Shopify CLI authorization opens automatically and the import continues after approval. Shopify cannot expose every merchant cost, so add apps, ads, fulfilment, payroll, and other operating expenses with the template to complete the holistic P&L.'
+    ? 'Orders, product costs, payments, and payouts are synced for the selected period. The URL is remembered separately for each signed-in GCS Books user on this device, and Shopify CLI authorization opens for the selected store only when needed. Shopify cannot expose every merchant cost, so add apps, ads, fulfilment, payroll, and other operating expenses with the template to complete the holistic P&L.'
     : shopifyMode === 'client_credentials'
       ? 'Orders, product costs, payments, and payouts are synced for the selected period. The Vercel server creates or refreshes the Shopify connection automatically, with no CLI session or browser approval. Shopify cannot expose every merchant cost, so add apps, ads, fulfilment, payroll, and other operating expenses with the template to complete the holistic P&L.'
       : 'Orders, product costs, payments, and payouts are synced for the selected period. The first import opens Shopify approval for this GCS Books user, then returns here and continues automatically. Shopify cannot expose every merchant cost, so add apps, ads, fulfilment, payroll, and other operating expenses with the template to complete the holistic P&L.';
