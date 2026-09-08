@@ -70,13 +70,10 @@ export function GET() {
   return json({ error: 'Use POST /api/shopify/import.', code: 'METHOD_NOT_ALLOWED' }, 405);
 }
 
-// Vercel's framework-agnostic Node runtime supports the Web fetch signature.
-// Keep the named methods above for local adapters, while also exposing the
-// default handler expected by deployments that use the fetch entrypoint.
-export default {
-  fetch(request: Request) {
-    if (request.method === 'POST') return POST(request);
-    if (request.method === 'GET') return GET();
-    return json({ error: 'Method not allowed.', code: 'METHOD_NOT_ALLOWED' }, 405);
-  },
-};
+// Expose a default Web handler as a compatibility path for Vercel projects
+// that use the framework-agnostic Node function adapter.
+export default async function handler(request: Request) {
+  if (request.method === 'POST') return POST(request);
+  if (request.method === 'GET') return GET();
+  return json({ error: 'Method not allowed.', code: 'METHOD_NOT_ALLOWED' }, 405);
+}
