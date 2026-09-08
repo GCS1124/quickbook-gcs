@@ -26,3 +26,10 @@ export async function GET(request: Request) {
     return redirect(target.toString(), clearShopifyOAuthCookies(request));
   }
 }
+
+// Expose the Web fetch entrypoint for Vercel's framework-agnostic Node runtime.
+export default {
+  fetch(request: Request) {
+    return GET(request);
+  },
+};
