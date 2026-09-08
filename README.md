@@ -52,6 +52,19 @@ SHOPIFY_TOKEN_ENCRYPTION_KEY=a-long-random-secret
 SHOPIFY_OAUTH_STATE_SECRET=a-different-long-random-secret
 ```
 
+Because GCS Books is a standalone app using the authorization-code grant, a
+Shopify CLI-created app must have `use_legacy_install_flow = true` in its
+`[access_scopes]` configuration before releasing the app version. Managed
+installation is for embedded apps using token exchange and sends merchants to
+Shopify's `/app/grant` flow instead of this server callback. The released
+production app configuration has been aligned with the standalone flow.
+
+The app must also be distributed to the store being connected. Custom
+distribution is limited to the selected store or its Plus organization; use a
+public distribution app for arbitrary merchant stores. If Shopify shows “This
+installation link can't be used”, refresh the import from GCS Books to create a
+new link and confirm that the app's distribution includes that store.
+
 For the optional no-approval Vercel mode, set `SHOPIFY_CONNECTION_MODE=client_credentials` and add `VITE_SHOPIFY_CONNECTION_MODE=client_credentials` as a public build variable so the import dialog describes the active connection. Also set `SHOPIFY_STORE_DOMAIN` or `SHOPIFY_ALLOWED_STORE_DOMAINS`; runtime selection is deliberately restricted to that allowlist so the app secret is never sent to an unapproved Shopify domain. This mode is not a replacement for per-user OAuth and cannot connect arbitrary external merchant stores. Never expose the client secret or encryption secret through `VITE_*` or `NEXT_PUBLIC_*`.
 
 Never prefix server-only values with `VITE_` or `NEXT_PUBLIC_`. The client secret and Shopify access tokens stay in the Vercel function and the encrypted Supabase `finance_shopify_connections` table. Apply the latest migration before the first production import. Both production modes send the resulting access token only from the server in the `X-Shopify-Access-Token` header.

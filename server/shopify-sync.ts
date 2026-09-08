@@ -272,8 +272,43 @@ function csvCell(value: unknown) {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-function toCsv(headers: string[], rows: unknown[][]) {
-  return [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n');
+// Keep generated Shopify files comfortably below the browser import limit. A
+// row is never split, and every part repeats the header so it can be imported
+// independently through the existing CSV parser and duplicate safeguards.
+const SHOPIFY_EXPORT_MAX_BYTES = 20 * 1024 * 1024;
+
+function splitCsvFiles(headers: string[], rows: unknown[][], baseName: string, source: ShopifySyncFile['source']): ShopifySyncFile[] {
+  if (!rows.length) return [];
+  const header = headers.map(csvCell).join(',');
+  const chunks: Array<{ lines: string[]; rowCount: number }> = [];
+  let lines = [header];
+  let byteLength = Buffer.byteLength(header, 'utf8');
+  let rowCount = 0;
+  const flush = () => {
+    if (!rowCount) return;
+    chunks.push({ lines, rowCount });
+    lines = [header];
+    byteLength = Buffer.byteLength(header, 'utf8');
+    rowCount = 0;
+  };
+
+  for (const row of rows) {
+    const line = row.map(csvCell).join(',');
+    const lineBytes = Buffer.byteLength(line, 'utf8');
+    if (rowCount > 0 && byteLength + 1 + lineBytes > SHOPIFY_EXPORT_MAX_BYTES) flush();
+    lines.push(line);
+    byteLength += 1 + lineBytes;
+    rowCount += 1;
+  }
+  flush();
+
+  const stem = baseName.replace(/\.csv$/i, '');
+  return chunks.map((chunk, index) => ({
+    name: chunks.length === 1 ? baseName : `${stem}-part-${index + 1}.csv`,
+    content: chunk.lines.join('\n'),
+    source,
+    rows: chunk.rowCount,
+  }));
 }
 
 export function normalizeStoreDomain(value: string) {
@@ -326,18 +361,27 @@ function cliErrorMessage(output: string) {
   return clean.slice(-500) || 'Shopify CLI could not execute the Admin API query.';
 }
 
-function parseCliJson(output: string): GraphQLResponse {
+function parseCliJson(output: string): JsonRecord {
   const trimmed = output.trim();
   try {
-    return JSON.parse(trimmed) as GraphQLResponse;
+    return JSON.parse(trimmed) as JsonRecord;
   } catch {
     const start = trimmed.indexOf('{');
     const end = trimmed.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      try { return JSON.parse(trimmed.slice(start, end + 1)) as GraphQLResponse; } catch { /* fall through */ }
+      try { return JSON.parse(trimmed.slice(start, end + 1)) as JsonRecord; } catch { /* fall through */ }
     }
   }
   throw new Error('Shopify CLI returned an unreadable response. Run the CLI command directly to check its authentication state.');
+}
+
+export function normalizeShopifyCliResponse(payload: JsonRecord): GraphQLResponse {
+  const nestedData = payload.data;
+  if (nestedData && typeof nestedData === 'object' && !Array.isArray(nestedData)) {
+    return { data: nestedData as JsonRecord, errors: Array.isArray(payload.errors) ? payload.errors as GraphQLResponse['errors'] : undefined };
+  }
+  const data = Object.fromEntries(Object.entries(payload).filter(([key]) => key !== 'errors')) as JsonRecord;
+  return { data, errors: Array.isArray(payload.errors) ? payload.errors as GraphQLResponse['errors'] : undefined };
 }
 
 function normalizeCliStore(value: string) {
@@ -460,9 +504,11 @@ async function executeShopifyQuery(env: ShopifySyncEnv, store: string, query: st
   const result = await runCli(env, args, CLI_TIMEOUT_MS);
   try {
     const payload = parseCliJson(result.stdout);
-    const errors = payload.errors?.map((error) => error.message).filter(Boolean) || [];
+    const errors = Array.isArray(payload.errors)
+      ? payload.errors.map((error) => (error && typeof error === 'object' ? (error as JsonRecord).message : undefined)).filter((message): message is string => typeof message === 'string' && Boolean(message))
+      : [];
     if (errors.length) throw new ShopifyCliError(errors.join(' · '), isAuthError(errors.join(' · ')));
-    return payload;
+    return normalizeShopifyCliResponse(payload);
   } catch (error) {
     if (error instanceof ShopifyCliError) throw error;
     throw error instanceof Error ? error : new ShopifyCliError('Shopify CLI returned an invalid GraphQL response.');
@@ -527,7 +573,7 @@ function addMoney(...values: MoneyValue[]) {
   return values.reduce((sum, value) => sum + Number(value?.amount || 0), 0).toFixed(2);
 }
 
-function orderFile(orders: ShopifyOrderNode[]): ShopifySyncFile {
+function orderFile(orders: ShopifyOrderNode[]): ShopifySyncFile[] {
   const headers = ['Name', 'Created at', 'Financial Status', 'Currency', 'Gross sales', 'Discount Amount', 'Refunded Amount', 'Shipping', 'Taxes', 'Total', 'Lineitem sku', 'Lineitem name', 'Lineitem quantity', 'Lineitem price', 'Lineitem discount', 'Order ID'];
   const rows = orders.flatMap((order) => {
     const lineItems = order.lineItems?.nodes || [];
@@ -535,13 +581,13 @@ function orderFile(orders: ShopifyOrderNode[]): ShopifySyncFile {
     if (!lineItems.length) return [[...base, '', '', '', '', '', order.id]];
     return lineItems.map((line) => [...base, line.sku || '', line.name || '', line.quantity || 0, moneyAmount(line.originalUnitPriceSet?.shopMoney), moneyAmount(line.totalDiscountSet?.shopMoney), order.id]);
   });
-  return { name: 'shopify-orders-cli.csv', content: toCsv(headers, rows), source: 'shopify_orders', rows: orders.length };
+  return splitCsvFiles(headers, rows, 'shopify-orders-cli.csv', 'shopify_orders');
 }
 
-function productFile(products: ShopifyProductNode[]): ShopifySyncFile {
+function productFile(products: ShopifyProductNode[]): ShopifySyncFile[] {
   const headers = ['Handle', 'Title', 'Variant SKU', 'Cost per item', 'Inventory quantity', 'Currency', 'Product ID', 'Variant ID'];
   const rows = products.flatMap((product) => (product.variants?.nodes || []).map((variant) => [product.handle, product.title, variant.sku || '', moneyAmount(variant.inventoryItem?.unitCost), variant.inventoryQuantity ?? '', moneyCurrency(variant.inventoryItem?.unitCost), product.id, variant.id]));
-  return { name: 'shopify-products-costs-cli.csv', content: toCsv(headers, rows), source: 'shopify_products', rows: rows.length };
+  return splitCsvFiles(headers, rows, 'shopify-products-costs-cli.csv', 'shopify_products');
 }
 
 function paymentFile(payments: ShopifyBalanceTransactionNode[], payoutById: Map<string, ShopifyPayoutNode>) {
@@ -551,17 +597,17 @@ function paymentFile(payments: ShopifyBalanceTransactionNode[], payoutById: Map<
     const payout = payoutById.get(payoutId);
     return [payment.transactionDate, transactionType(payment.type), moneyAmount(payment.amount), moneyAmount(payment.fee), moneyAmount(payment.net), moneyCurrency(payment.amount), payment.associatedOrder?.name || payment.associatedOrder?.id || '', payoutId, payout ? dateOnly(payout.issuedAt) : '', payment.associatedPayout?.status || '', '', payment.id];
   });
-  return { name: 'shopify-payments-cli.csv', content: toCsv(headers, rows), source: 'shopify_payment_transactions' as const, rows: payments.length };
+  return splitCsvFiles(headers, rows, 'shopify-payments-cli.csv', 'shopify_payment_transactions');
 }
 
-function payoutFile(payouts: ShopifyPayoutNode[]): ShopifySyncFile {
+function payoutFile(payouts: ShopifyPayoutNode[]): ShopifySyncFile[] {
   const headers = ['Payout Date', 'Payout ID', 'Status', 'Charges', 'Refunds', 'Adjustments', 'Marketplace Sales Tax', 'Fees', 'Total', 'Currency', 'Bank Reference', 'Transaction Type'];
   const rows = payouts.map((payout) => {
     const summary = payout.summary || {};
     const fees = addMoney(summary.chargesFee, summary.refundsFee, summary.adjustmentsFee, summary.advanceFees, summary.reservedFundsFee, summary.retriedPayoutsFee);
     return [dateOnly(payout.issuedAt), payout.id, payout.status.toLowerCase(), moneyAmount(summary.chargesGross), moneyAmount(summary.refundsFeeGross), moneyAmount(summary.adjustmentsGross), '0.00', fees, moneyAmount(payout.net), moneyCurrency(payout.net), payout.externalTraceId || payout.id, payout.transactionType.toLowerCase()];
   });
-  return { name: 'shopify-payouts-cli.csv', content: toCsv(headers, rows), source: 'payouts', rows: payouts.length };
+  return splitCsvFiles(headers, rows, 'shopify-payouts-cli.csv', 'payouts');
 }
 
 function readJsonBody(request: IncomingMessage) {
@@ -582,12 +628,20 @@ export async function runShopifySyncWithExecutor(executeQuery: ShopifyQueryExecu
   const warnings: string[] = [];
   const files: ShopifySyncFile[] = [];
   const orderResult = await fetchConnection<ShopifyOrderNode>(executeQuery, ORDERS_QUERY, ['orders'], { query: searchQuery(range, 'processed_at') });
-  if (orderResult.nodes.length) files.push(orderFile(orderResult.nodes));
+  if (orderResult.nodes.length) {
+    const orderFiles = orderFile(orderResult.nodes);
+    files.push(...orderFiles);
+    if (orderFiles.length > 1) warnings.push(`Orders were split into ${orderFiles.length} CSV files to keep each Shopify export below 25 MB.`);
+  }
   if (orderResult.nodes.some((order) => order.lineItems?.pageInfo?.hasNextPage)) warnings.push('Some orders contain more than 250 line items and were imported with the first 250 line items.');
 
   try {
     const productResult = await fetchConnection<ShopifyProductNode>(executeQuery, PRODUCTS_QUERY, ['products'], {});
-    if (productResult.nodes.length) files.push(productFile(productResult.nodes));
+    if (productResult.nodes.length) {
+      const productFiles = productFile(productResult.nodes);
+      files.push(...productFiles);
+      if (productFiles.length > 1) warnings.push(`Product costs were split into ${productFiles.length} CSV files to keep each Shopify export below 25 MB.`);
+    }
     if (productResult.nodes.some((product) => product.variants?.pageInfo?.hasNextPage)) warnings.push('Some products contain more than 250 variants and were imported with the first 250 variants.');
   } catch (error) {
     warnings.push(`Products and costs were not imported: ${error instanceof Error ? error.message : 'Shopify returned an error.'}`);
@@ -598,7 +652,11 @@ export async function runShopifySyncWithExecutor(executeQuery: ShopifyQueryExecu
     const payoutResult = await fetchConnection<ShopifyPayoutNode>(executeQuery, PAYOUTS_QUERY, ['shopifyPaymentsAccount', 'payouts'], { query: searchQuery(range, 'issued_at') }, 'Shopify Payments is not available for this store.');
     payouts = payoutResult.nodes;
     if (payoutResult.unavailable) warnings.push(payoutResult.unavailable);
-    if (payouts.length) files.push(payoutFile(payouts));
+    if (payouts.length) {
+      const payoutFiles = payoutFile(payouts);
+      files.push(...payoutFiles);
+      if (payoutFiles.length > 1) warnings.push(`Payouts were split into ${payoutFiles.length} CSV files to keep each Shopify export below 25 MB.`);
+    }
   } catch (error) {
     warnings.push(`Payouts were not imported: ${error instanceof Error ? error.message : 'Shopify returned an error.'}`);
   }
@@ -607,7 +665,11 @@ export async function runShopifySyncWithExecutor(executeQuery: ShopifyQueryExecu
   try {
     const paymentResult = await fetchConnection<ShopifyBalanceTransactionNode>(executeQuery, PAYMENTS_QUERY, ['shopifyPaymentsAccount', 'balanceTransactions'], { query: searchQuery(range, 'transaction_dates') }, 'Shopify Payments transactions are not available for this store.');
     if (paymentResult.unavailable) warnings.push(paymentResult.unavailable);
-    if (paymentResult.nodes.length) files.push(paymentFile(paymentResult.nodes, payoutById));
+    if (paymentResult.nodes.length) {
+      const paymentFiles = paymentFile(paymentResult.nodes, payoutById);
+      files.push(...paymentFiles);
+      if (paymentFiles.length > 1) warnings.push(`Payment transactions were split into ${paymentFiles.length} CSV files to keep each Shopify export below 25 MB.`);
+    }
   } catch (error) {
     warnings.push(`Payments were not imported: ${error instanceof Error ? error.message : 'Shopify returned an error.'}`);
   }
