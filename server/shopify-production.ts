@@ -13,7 +13,7 @@ import {
   type JsonRecord,
   type ShopifyImportPeriod,
   type ShopifyQueryExecutor,
-} from './shopify-sync';
+} from './shopify-sync.js';
 
 const DEFAULT_API_VERSION = '2026-07';
 const DEFAULT_SCOPES = 'read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments';

@@ -5,8 +5,8 @@ import {
   ProductionShopifyError,
   requireAuthenticatedShopifyRequest,
   resolveShopifyConnection,
-} from '../../server/shopify-production';
-import { runShopifySyncWithExecutor, type ShopifyImportPeriod } from '../../server/shopify-sync';
+} from '../../server/shopify-production.js';
+import { runShopifySyncWithExecutor, type ShopifyImportPeriod } from '../../server/shopify-sync.js';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;

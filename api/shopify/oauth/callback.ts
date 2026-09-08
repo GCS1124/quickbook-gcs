@@ -2,7 +2,7 @@ import {
   clearShopifyOAuthCookies,
   completeShopifyOAuth,
   ProductionShopifyError,
-} from '../../../server/shopify-production';
+} from '../../../server/shopify-production.js';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;

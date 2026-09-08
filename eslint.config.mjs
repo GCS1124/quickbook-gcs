@@ -4,7 +4,7 @@ import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', '.next/**', '.vinext/**', '.playwright-mcp/**', '.wrangler/**'],
+    ignores: ['dist/**', 'node_modules/**', '.vercel/**', '.next/**', '.vinext/**', '.playwright-mcp/**', '.wrangler/**'],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
