@@ -43,14 +43,30 @@ export async function POST(request: Request) {
       }, 409, [authorization.setCookie]);
     }
 
+    const runImport = (activeConnection: typeof connection) => runShopifySyncWithExecutor(
+      createShopifyAdminExecutor(context.config, activeConnection),
+      period,
+      activeConnection.storeDomain,
+    );
     try {
-      const result = await runShopifySyncWithExecutor(
-        createShopifyAdminExecutor(context.config, connection),
-        period,
-        connection.storeDomain,
-      );
+      const result = await runImport(connection);
       return json(result as unknown as Record<string, unknown>, 200, clearShopifyOAuthCookies(request));
     } catch (error) {
+      if (context.config.connectionMode === 'client_credentials' && error instanceof ProductionShopifyError && error.code === 'SHOPIFY_REAUTH_REQUIRED') {
+        const refreshedConnection = await resolveShopifyConnection(request, context, { forceRefresh: true });
+        if (refreshedConnection) {
+          try {
+            const result = await runImport(refreshedConnection);
+            return json(result as unknown as Record<string, unknown>, 200, clearShopifyOAuthCookies(request));
+          } catch (refreshError) {
+            if (refreshError instanceof ProductionShopifyError && refreshError.code === 'SHOPIFY_REAUTH_REQUIRED') {
+              throw new ProductionShopifyError('Shopify rejected the native server connection. Check the app credentials and approved scopes, then try again.', 502, 'SHOPIFY_CLIENT_CREDENTIALS_FAILED');
+            }
+            throw refreshError;
+          }
+        }
+      }
+      if (context.config.connectionMode === 'client_credentials') throw error;
       if (error instanceof ProductionShopifyError && error.code === 'SHOPIFY_REAUTH_REQUIRED') {
         const authorization = beginShopifyOAuth(request, context.userId, period);
         return json({

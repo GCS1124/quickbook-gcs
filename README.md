@@ -32,12 +32,15 @@ The first-use authorization requests `read_orders,read_all_orders,read_products,
 
 ### Production Shopify connection
 
-Vercel cannot run a developer machine’s interactive Shopify CLI session. The deployed app therefore uses a server-side Shopify authorization-code flow at `/api/shopify/import`: the signed-in GCS Books user chooses a period, approves Shopify the first time, returns to GCS Books, and the selected import resumes automatically. Each GCS Books user gets a separate encrypted Shopify connection; no Shopify token is stored in browser storage.
+Vercel cannot keep a developer machine’s interactive Shopify CLI session. The deployed app therefore supports two server-side modes at `/api/shopify/import`: OAuth for external merchant stores, or Shopify’s client-credentials grant for a store owned by the same Shopify organization as the app. Both modes use the same server-only Admin GraphQL/import pipeline, keep each GCS Books user scoped through Supabase, and never send a Shopify token to browser storage.
+
+For a no-approval native server connection on Vercel, use `SHOPIFY_CONNECTION_MODE=client_credentials`. This exchanges the app credentials for a short-lived Shopify token on the server, encrypts the token in `finance_shopify_connections`, reuses it while valid, and refreshes it automatically before expiry. This mode is only appropriate when the app and store belong to the same Shopify organization. For a customer or other external merchant store, keep `SHOPIFY_CONNECTION_MODE=oauth`; the first import opens Shopify approval for that signed-in GCS Books user. Local development continues to use the native Shopify CLI flow.
 
 Create a Shopify standalone/API-only app, register `https://quickbook-gcs.vercel.app/api/shopify/oauth/callback` as an allowed redirect URL, and add these server-only variables to the Vercel Production environment before deploying:
 
 ```ini
 SHOPIFY_STORE_DOMAIN=your-store.myshopify.com
+SHOPIFY_CONNECTION_MODE=oauth
 SHOPIFY_APP_CLIENT_ID=your-shopify-app-client-id
 SHOPIFY_APP_CLIENT_SECRET=your-shopify-app-client-secret
 SHOPIFY_APP_REDIRECT_URI=https://quickbook-gcs.vercel.app/api/shopify/oauth/callback
@@ -45,7 +48,9 @@ SHOPIFY_TOKEN_ENCRYPTION_KEY=a-long-random-secret
 SHOPIFY_OAUTH_STATE_SECRET=a-different-long-random-secret
 ```
 
-Never prefix these values with `VITE_` or `NEXT_PUBLIC_`. The client secret and Shopify access tokens stay in the Vercel function and the encrypted Supabase `finance_shopify_connections` table. Apply the latest migration before the first production import. The production flow uses Shopify’s authorization-code grant and sends the resulting access token only from the server in the `X-Shopify-Access-Token` header.
+For the no-approval Vercel mode, set `SHOPIFY_CONNECTION_MODE=client_credentials` and add `VITE_SHOPIFY_CONNECTION_MODE=client_credentials` as a public build variable so the import dialog describes the active connection. The OAuth redirect and state secret are not needed by the client-credentials mode, but the store domain, app client ID/secret, Supabase variables, and token-encryption secret are still required. Never expose the client secret or encryption secret through `VITE_*` or `NEXT_PUBLIC_*`.
+
+Never prefix server-only values with `VITE_` or `NEXT_PUBLIC_`. The client secret and Shopify access tokens stay in the Vercel function and the encrypted Supabase `finance_shopify_connections` table. Apply the latest migration before the first production import. Both production modes send the resulting access token only from the server in the `X-Shopify-Access-Token` header.
 
 The first four options use complete calendar months. Lifetime reads all data available to the authenticated CLI session; historical orders older than Shopify's default 60-day window require the `read_all_orders` permission. Product costs also require access to product costs in Shopify. If the store does not use Shopify Payments, the sync keeps orders and products and explains why payments or payouts are unavailable.
 

@@ -20,6 +20,10 @@ const DEFAULT_SCOPES = 'read_orders,read_all_orders,read_products,read_inventory
 const OAUTH_STATE_COOKIE = 'gcs-books-shopify-oauth-state';
 const PENDING_CONNECTION_COOKIE = 'gcs-books-shopify-pending';
 const OAUTH_STATE_TTL_SECONDS = 10 * 60;
+const CLIENT_CREDENTIALS_REFRESH_BUFFER_MS = 60 * 1000;
+const CLIENT_CREDENTIALS_FALLBACK_TTL_MS = 23 * 60 * 60 * 1000;
+
+export type ShopifyConnectionMode = 'oauth' | 'client_credentials';
 
 export class ProductionShopifyError extends Error {
   constructor(
@@ -36,6 +40,7 @@ export type ProductionShopifyConfig = {
   storeDomain: string;
   apiVersion: string;
   scopes: string;
+  connectionMode: ShopifyConnectionMode;
   clientId: string;
   clientSecret: string;
   redirectUri: string;
@@ -56,6 +61,7 @@ export type ShopifyConnection = {
   storeDomain: string;
   accessToken: string;
   scope: string | null;
+  expiresAt: number | null;
 };
 
 type OAuthState = {
@@ -71,6 +77,7 @@ type PendingConnection = {
   storeDomain: string;
   accessToken: string;
   scope: string | null;
+  tokenExpiresAt: number | null;
   expiresAt: number;
 };
 
@@ -94,12 +101,21 @@ function missingConfig(names: string[]) {
 export function getProductionShopifyConfig(request?: Request): ProductionShopifyConfig {
   const supabaseUrl = envValue('VITE_SUPABASE_URL') || envValue('NEXT_PUBLIC_SUPABASE_URL');
   const supabasePublishableKey = envValue('VITE_SUPABASE_PUBLISHABLE_KEY') || envValue('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY');
+  const connectionModeValue = envValue('SHOPIFY_CONNECTION_MODE').toLowerCase() || 'oauth';
   const storeDomainValue = envValue('SHOPIFY_STORE_DOMAIN');
   const clientId = envValue('SHOPIFY_APP_CLIENT_ID');
   const clientSecret = envValue('SHOPIFY_APP_CLIENT_SECRET');
   const tokenEncryptionSecret = envValue('SHOPIFY_TOKEN_ENCRYPTION_KEY');
   const oauthStateSecret = envValue('SHOPIFY_OAUTH_STATE_SECRET');
   const redirectUri = envValue('SHOPIFY_APP_REDIRECT_URI') || (request ? new URL('/api/shopify/oauth/callback', request.url).toString() : '');
+  if (connectionModeValue !== 'oauth' && connectionModeValue !== 'client_credentials') {
+    throw new ProductionShopifyError(
+      'SHOPIFY_CONNECTION_MODE must be oauth or client_credentials.',
+      503,
+      'SHOPIFY_NOT_CONFIGURED',
+    );
+  }
+  const connectionMode = connectionModeValue as ShopifyConnectionMode;
   missingConfig([
     ...(!supabaseUrl ? ['VITE_SUPABASE_URL'] : []),
     ...(!supabasePublishableKey ? ['VITE_SUPABASE_PUBLISHABLE_KEY'] : []),
@@ -107,8 +123,8 @@ export function getProductionShopifyConfig(request?: Request): ProductionShopify
     ...(!clientId ? ['SHOPIFY_APP_CLIENT_ID'] : []),
     ...(!clientSecret ? ['SHOPIFY_APP_CLIENT_SECRET'] : []),
     ...(!tokenEncryptionSecret ? ['SHOPIFY_TOKEN_ENCRYPTION_KEY'] : []),
-    ...(!oauthStateSecret ? ['SHOPIFY_OAUTH_STATE_SECRET'] : []),
-    ...(!redirectUri ? ['SHOPIFY_APP_REDIRECT_URI'] : []),
+    ...(connectionMode === 'oauth' && !oauthStateSecret ? ['SHOPIFY_OAUTH_STATE_SECRET'] : []),
+    ...(connectionMode === 'oauth' && !redirectUri ? ['SHOPIFY_APP_REDIRECT_URI'] : []),
   ]);
 
   let storeDomain: string;
@@ -122,6 +138,7 @@ export function getProductionShopifyConfig(request?: Request): ProductionShopify
     storeDomain,
     apiVersion: envValue('SHOPIFY_API_VERSION') || DEFAULT_API_VERSION,
     scopes: envValue('SHOPIFY_OAUTH_SCOPES') || DEFAULT_SCOPES,
+    connectionMode,
     clientId,
     clientSecret,
     redirectUri,
@@ -286,6 +303,39 @@ async function exchangeAuthorizationCode(config: ProductionShopifyConfig, code: 
   return { accessToken: payload.access_token, scope: typeof payload.scope === 'string' ? payload.scope : null };
 }
 
+async function exchangeClientCredentials(config: ProductionShopifyConfig) {
+  let response: Response;
+  try {
+    response = await fetch(`https://${config.storeDomain}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+      }),
+    });
+  } catch {
+    throw new ProductionShopifyError('Shopify could not be reached while creating the native server connection. Try the import again.', 502, 'SHOPIFY_CLIENT_CREDENTIALS_FAILED');
+  }
+  const payload = await response.json().catch(() => ({})) as {
+    access_token?: unknown;
+    expires_in?: unknown;
+    scope?: unknown;
+  };
+  const expiresInSeconds = Number(payload.expires_in);
+  if (!response.ok || typeof payload.access_token !== 'string' || !payload.access_token) {
+    throw new ProductionShopifyError('Shopify native server connection could not be created. Check the store domain, app credentials, and approved scopes, then try again.', 502, 'SHOPIFY_CLIENT_CREDENTIALS_FAILED');
+  }
+  return {
+    accessToken: payload.access_token,
+    scope: typeof payload.scope === 'string' ? payload.scope : null,
+    expiresAt: Number.isFinite(expiresInSeconds) && expiresInSeconds > 0
+      ? Date.now() + expiresInSeconds * 1000
+      : Date.now() + CLIENT_CREDENTIALS_FALLBACK_TTL_MS,
+  };
+}
+
 export async function completeShopifyOAuth(request: Request) {
   const url = new URL(request.url);
   const config = getProductionShopifyConfig(request);
@@ -315,6 +365,7 @@ export async function completeShopifyOAuth(request: Request) {
     storeDomain,
     accessToken: token.accessToken,
     scope: token.scope,
+    tokenExpiresAt: null,
     expiresAt: Date.now() + OAUTH_STATE_TTL_SECONDS * 1000,
   };
   const redirectUrl = new URL('/?view=imports&shopify=connected', config.redirectUri);
@@ -343,9 +394,13 @@ async function readStoredConnection(context: AuthenticatedShopifyRequest): Promi
   if (!result.data) return null;
   const stored = result.data as StoredConnection;
   try {
-    const token = decryptJson<{ accessToken?: unknown }>(stored.access_token_ciphertext, context.config.tokenEncryptionSecret);
+    const token = decryptJson<{ accessToken?: unknown; expiresAt?: unknown }>(stored.access_token_ciphertext, context.config.tokenEncryptionSecret);
     if (typeof token.accessToken !== 'string' || !token.accessToken) throw new Error('Missing token');
-    return { storeDomain: normalizeStoreDomain(stored.store_domain), accessToken: token.accessToken, scope: stored.scope || null };
+    const expiresAt = typeof token.expiresAt === 'number' && Number.isFinite(token.expiresAt) ? token.expiresAt : null;
+    if (context.config.connectionMode === 'client_credentials' && (expiresAt === null || expiresAt <= Date.now() + CLIENT_CREDENTIALS_REFRESH_BUFFER_MS)) {
+      return null;
+    }
+    return { storeDomain: normalizeStoreDomain(stored.store_domain), accessToken: token.accessToken, scope: stored.scope || null, expiresAt };
   } catch {
     throw new ProductionShopifyError('Your saved Shopify connection cannot be opened. Reconnect Shopify to refresh it.', 409, 'SHOPIFY_REAUTH_REQUIRED');
   }
@@ -355,18 +410,29 @@ async function saveConnection(context: AuthenticatedShopifyRequest, pending: Pen
   const result = await context.supabase.from('finance_shopify_connections').upsert({
     user_id: context.userId,
     store_domain: pending.storeDomain,
-    access_token_ciphertext: encryptJson({ accessToken: pending.accessToken }, context.config.tokenEncryptionSecret),
+    access_token_ciphertext: encryptJson({ accessToken: pending.accessToken, expiresAt: pending.tokenExpiresAt }, context.config.tokenEncryptionSecret),
     scope: pending.scope,
     connected_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }, { onConflict: 'user_id' });
   if (result.error) throw new ProductionShopifyError('GCS Books could not save your Shopify connection. Check Supabase and try again.', 503, 'SHOPIFY_DATABASE_NOT_READY');
-  return { storeDomain: pending.storeDomain, accessToken: pending.accessToken, scope: pending.scope };
+  return { storeDomain: pending.storeDomain, accessToken: pending.accessToken, scope: pending.scope, expiresAt: pending.tokenExpiresAt };
 }
 
-export async function resolveShopifyConnection(request: Request, context: AuthenticatedShopifyRequest) {
-  const saved = await readStoredConnection(context);
+export async function resolveShopifyConnection(request: Request, context: AuthenticatedShopifyRequest, options: { forceRefresh?: boolean } = {}) {
+  const saved = options.forceRefresh ? null : await readStoredConnection(context);
   if (saved) return saved;
+  if (context.config.connectionMode === 'client_credentials') {
+    const token = await exchangeClientCredentials(context.config);
+    return saveConnection(context, {
+      userId: context.userId,
+      storeDomain: context.config.storeDomain,
+      accessToken: token.accessToken,
+      scope: token.scope,
+      tokenExpiresAt: token.expiresAt,
+      expiresAt: Date.now() + OAUTH_STATE_TTL_SECONDS * 1000,
+    });
+  }
   const rawPending = parseCookies(request).get(PENDING_CONNECTION_COOKIE);
   if (!rawPending) return null;
   let pending: PendingConnection;
