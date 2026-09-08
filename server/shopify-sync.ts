@@ -528,8 +528,8 @@ async function runShopifySyncUnlocked(env: ShopifySyncEnv, period: ShopifyImport
   return runShopifySyncWithExecutor(createAuthenticatedShopifyExecutor(env, store, userId), period, store);
 }
 
-async function runShopifySync(env: ShopifySyncEnv, period: ShopifyImportPeriod, userId: string): Promise<ShopifySyncPayload> {
-  const store = normalizeStoreDomain(env.SHOPIFY_STORE_DOMAIN || '');
+async function runShopifySync(env: ShopifySyncEnv, period: ShopifyImportPeriod, userId: string, storeOverride?: string): Promise<ShopifySyncPayload> {
+  const store = normalizeStoreDomain(storeOverride || env.SHOPIFY_STORE_DOMAIN || '');
   const authorizationKey = `${userId}:${store}`;
   const previous = shopifyCliQueue;
   let release!: () => void;
@@ -582,12 +582,12 @@ export function createShopifySyncPlugin(env: ShopifySyncEnv): Plugin {
         }
         try {
           const userId = await requireAuthenticatedUser(request, env);
-          const body = JSON.parse((await readJsonBody(request)) || '{}') as { period?: string };
+          const body = JSON.parse((await readJsonBody(request)) || '{}') as { period?: string; storeDomain?: string };
           if (!body.period || !VALID_PERIODS.has(body.period as ShopifyImportPeriod)) {
             jsonResponse(response, 400, { error: 'Choose a valid Shopify import period.' });
             return;
           }
-          const result = await runShopifySync(env, body.period as ShopifyImportPeriod, userId);
+          const result = await runShopifySync(env, body.period as ShopifyImportPeriod, userId, body.storeDomain?.trim() || undefined);
           jsonResponse(response, 200, result as unknown as JsonRecord);
         } catch (error) {
           const status = error instanceof ShopifyRequestError ? error.statusCode : 502;

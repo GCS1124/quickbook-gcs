@@ -38,6 +38,7 @@ export class ProductionShopifyError extends Error {
 
 export type ProductionShopifyConfig = {
   storeDomain: string | null;
+  allowedStoreDomains: string[];
   apiVersion: string;
   scopes: string;
   connectionMode: ShopifyConnectionMode;
@@ -104,6 +105,9 @@ export function getProductionShopifyConfig(request?: Request): ProductionShopify
   const supabasePublishableKey = envValue('VITE_SUPABASE_PUBLISHABLE_KEY') || envValue('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY');
   const connectionModeValue = envValue('SHOPIFY_CONNECTION_MODE').toLowerCase() || 'oauth';
   const storeDomainValue = envValue('SHOPIFY_STORE_DOMAIN');
+  const allowedStoreDomainValues = [storeDomainValue, ...envValue('SHOPIFY_ALLOWED_STORE_DOMAINS').split(',')]
+    .map((value) => value.trim())
+    .filter(Boolean);
   const clientId = envValue('SHOPIFY_APP_CLIENT_ID');
   const clientSecret = envValue('SHOPIFY_APP_CLIENT_SECRET');
   const tokenEncryptionSecret = envValue('SHOPIFY_TOKEN_ENCRYPTION_KEY');
@@ -120,6 +124,7 @@ export function getProductionShopifyConfig(request?: Request): ProductionShopify
   missingConfig([
     ...(!supabaseUrl ? ['VITE_SUPABASE_URL'] : []),
     ...(!supabasePublishableKey ? ['VITE_SUPABASE_PUBLISHABLE_KEY'] : []),
+    ...(connectionMode === 'client_credentials' && !allowedStoreDomainValues.length ? ['SHOPIFY_STORE_DOMAIN or SHOPIFY_ALLOWED_STORE_DOMAINS'] : []),
     ...(!clientId ? ['SHOPIFY_APP_CLIENT_ID'] : []),
     ...(!clientSecret ? ['SHOPIFY_APP_CLIENT_SECRET'] : []),
     ...(!tokenEncryptionSecret ? ['SHOPIFY_TOKEN_ENCRYPTION_KEY'] : []),
@@ -127,17 +132,17 @@ export function getProductionShopifyConfig(request?: Request): ProductionShopify
     ...(connectionMode === 'oauth' && !redirectUri ? ['SHOPIFY_APP_REDIRECT_URI'] : []),
   ]);
 
-  let storeDomain: string | null = null;
-  if (storeDomainValue) {
-    try {
-      storeDomain = normalizeStoreDomain(storeDomainValue);
-    } catch {
-      throw new ProductionShopifyError('SHOPIFY_STORE_DOMAIN must be a valid store.myshopify.com domain.', 503, 'SHOPIFY_NOT_CONFIGURED');
-    }
+  let allowedStoreDomains: string[];
+  try {
+    allowedStoreDomains = [...new Set(allowedStoreDomainValues.map((value) => normalizeStoreDomain(value)))];
+  } catch {
+    throw new ProductionShopifyError('SHOPIFY_STORE_DOMAIN and SHOPIFY_ALLOWED_STORE_DOMAINS must contain valid store.myshopify.com domains.', 503, 'SHOPIFY_NOT_CONFIGURED');
   }
+  const storeDomain = allowedStoreDomains[0] || null;
 
   return {
     storeDomain,
+    allowedStoreDomains,
     apiVersion: envValue('SHOPIFY_API_VERSION') || DEFAULT_API_VERSION,
     scopes: envValue('SHOPIFY_OAUTH_SCOPES') || DEFAULT_SCOPES,
     connectionMode,
@@ -173,6 +178,9 @@ export async function requireAuthenticatedShopifyRequest(request: Request, store
       storeDomain = normalizeStoreDomain(storeDomainOverride);
     } catch {
       throw new ProductionShopifyError('Choose a valid Shopify store.myshopify.com domain.', 400, 'SHOPIFY_STORE_INVALID');
+    }
+    if (config.connectionMode === 'client_credentials' && !config.allowedStoreDomains.includes(storeDomain)) {
+      throw new ProductionShopifyError('That Shopify store is not enabled for this native server connection.', 403, 'SHOPIFY_STORE_NOT_ALLOWED');
     }
   }
   return { accessToken, userId: user.id, storeDomain, config, supabase };
@@ -409,6 +417,7 @@ async function readStoredConnection(context: AuthenticatedShopifyRequest): Promi
     const token = decryptJson<{ accessToken?: unknown; expiresAt?: unknown }>(stored.access_token_ciphertext, context.config.tokenEncryptionSecret);
     if (typeof token.accessToken !== 'string' || !token.accessToken) throw new Error('Missing token');
     const storedStoreDomain = normalizeStoreDomain(stored.store_domain);
+    if (context.config.connectionMode === 'client_credentials' && !context.config.allowedStoreDomains.includes(storedStoreDomain)) return null;
     if (context.storeDomain && storedStoreDomain !== context.storeDomain) return null;
     const expiresAt = typeof token.expiresAt === 'number' && Number.isFinite(token.expiresAt) ? token.expiresAt : null;
     if (context.config.connectionMode === 'client_credentials' && (expiresAt === null || expiresAt <= Date.now() + CLIENT_CREDENTIALS_REFRESH_BUFFER_MS)) {
