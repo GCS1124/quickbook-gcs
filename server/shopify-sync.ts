@@ -283,6 +283,27 @@ export function normalizeStoreDomain(value: string) {
   return normalized;
 }
 
+export function normalizeShopifyStoreInput(value: string) {
+  const input = value.trim();
+  if (!input) throw new Error('Enter your Shopify admin page URL or store.myshopify.com domain.');
+  try {
+    const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `https://${input}`;
+    const url = new URL(candidate);
+    const hostname = url.hostname.toLowerCase();
+    if (hostname === 'admin.shopify.com') {
+      const parts = url.pathname.split('/').filter(Boolean);
+      const storeIndex = parts.findIndex((part) => part.toLowerCase() === 'store');
+      const handle = storeIndex >= 0 ? decodeURIComponent(parts[storeIndex + 1] || '') : '';
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(handle)) throw new Error('Invalid Shopify admin URL.');
+      return normalizeStoreDomain(`${handle}.myshopify.com`);
+    }
+    if (hostname.endsWith('.myshopify.com')) return normalizeStoreDomain(hostname);
+  } catch {
+    // Return one safe, actionable message for malformed or non-Shopify URLs.
+  }
+  throw new Error('Enter a Shopify admin page URL such as https://admin.shopify.com/store/your-store or a store.myshopify.com domain.');
+}
+
 function isAuthError(output: string) {
   return /auth|token|login|credential|access denied|unauthori[sz]ed|permission/i.test(output);
 }
@@ -554,7 +575,7 @@ async function runShopifySyncUnlocked(env: ShopifySyncEnv, period: ShopifyImport
 }
 
 async function runShopifySync(env: ShopifySyncEnv, period: ShopifyImportPeriod, userId: string, storeOverride?: string): Promise<ShopifySyncPayload> {
-  const store = normalizeStoreDomain(storeOverride || env.SHOPIFY_STORE_DOMAIN || '');
+  const store = normalizeShopifyStoreInput(storeOverride || env.SHOPIFY_STORE_DOMAIN || '');
   const authorizationKey = `${userId}:${store}`;
   const previous = shopifyCliQueue;
   let release!: () => void;
@@ -621,12 +642,13 @@ export function createShopifySyncPlugin(env: ShopifySyncEnv): Plugin {
         }
         try {
           const userId = await requireAuthenticatedUser(request, env);
-          const body = JSON.parse((await readJsonBody(request)) || '{}') as { period?: string; storeDomain?: string };
+          const body = JSON.parse((await readJsonBody(request)) || '{}') as { period?: string; shopifyPageUrl?: string; storeDomain?: string };
           if (!body.period || !VALID_PERIODS.has(body.period as ShopifyImportPeriod)) {
             jsonResponse(response, 400, { error: 'Choose a valid Shopify import period.' });
             return;
           }
-          const result = await runShopifySync(env, body.period as ShopifyImportPeriod, userId, body.storeDomain?.trim() || undefined);
+          const storeInput = body.shopifyPageUrl?.trim() || body.storeDomain?.trim() || undefined;
+          const result = await runShopifySync(env, body.period as ShopifyImportPeriod, userId, storeInput);
           jsonResponse(response, 200, result as unknown as JsonRecord);
         } catch (error) {
           const status = error instanceof ShopifyRequestError ? error.statusCode : 502;

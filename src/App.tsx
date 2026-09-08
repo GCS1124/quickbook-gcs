@@ -80,6 +80,7 @@ const MAX_IMPORT_FILE_SIZE = 25 * 1024 * 1024;
 const localDatePart = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 const dateOffset = (days: number) => { const d = new Date(today); d.setDate(d.getDate() + days); return localDatePart(d); };
 const importFileKey = (file: File) => `${file.name}:${file.size}:${file.lastModified}`;
+const shopifyPageUrlStorageKey = (userId?: string) => userId ? `gcs-books-shopify-page-url:${userId}` : 'gcs-books-shopify-page-url';
 const sourceKindLabels: Record<ImportSourceKind, string> = {
   payment_transactions: 'Payment transactions',
   shopify_payment_transactions: 'Payments transactions',
@@ -576,7 +577,7 @@ export default function App() {
     }
   }
 
-  async function handleShopifyImport(period: ShopifyImportPeriod, storeDomain?: string): Promise<boolean> {
+  async function handleShopifyImport(period: ShopifyImportPeriod, shopifyPageUrl?: string): Promise<boolean> {
     setShopifySyncLoading(true);
     setShopifySyncError('');
     setShopifySyncMessage('');
@@ -595,14 +596,14 @@ export default function App() {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${activeSession.access_token}` },
-        body: JSON.stringify({ period, ...(storeDomain ? { storeDomain } : {}) }),
+        body: JSON.stringify({ period, ...(shopifyPageUrl ? { shopifyPageUrl } : {}) }),
       }), 900_000, 'Shopify authorization/import timed out. Finish the Shopify approval flow or try again.');
       const payload = await response.json().catch(() => ({})) as ShopifySyncResponse;
       if (!response.ok) {
         if (payload.authorizationUrl && (payload.code === 'SHOPIFY_AUTH_REQUIRED' || payload.code === 'SHOPIFY_REAUTH_REQUIRED')) {
           try {
             window.sessionStorage.setItem('gcs-books-shopify-period', period);
-            if (storeDomain) window.sessionStorage.setItem('gcs-books-shopify-store-domain', storeDomain);
+            if (shopifyPageUrl) window.sessionStorage.setItem(shopifyPageUrlStorageKey(activeSession.user.id), shopifyPageUrl);
           } catch { /* session storage may be unavailable */ }
           window.location.assign(payload.authorizationUrl);
           return false;
@@ -660,13 +661,16 @@ export default function App() {
     if (!session?.user.id) return;
     const validPeriod = params.get('period');
     const period: ShopifyImportPeriod = validPeriod === 'last_3_months' || validPeriod === 'last_6_months' || validPeriod === 'last_1_year' || validPeriod === 'lifetime' ? validPeriod : 'last_month';
-    let storeDomain: string | undefined;
-    try { storeDomain = window.sessionStorage.getItem('gcs-books-shopify-store-domain') || undefined; } catch { /* session storage may be unavailable */ }
+    let shopifyPageUrl: string | undefined;
+    try {
+      const storageKey = shopifyPageUrlStorageKey(session.user.id);
+      shopifyPageUrl = window.sessionStorage.getItem(storageKey) || window.localStorage.getItem(storageKey) || undefined;
+    } catch { /* browser storage may be unavailable */ }
     const resumeKey = `${session.user.id}:${period}`;
     if (shopifyOAuthResumeRef.current === resumeKey) return;
     shopifyOAuthResumeRef.current = resumeKey;
     window.history.replaceState({}, '', `${window.location.pathname}?view=imports`);
-    window.setTimeout(() => { void shopifyImportHandlerRef.current?.(period, storeDomain); }, 0);
+    window.setTimeout(() => { void shopifyImportHandlerRef.current?.(period, shopifyPageUrl); }, 0);
   }, [session?.user.id]);
 
   const stats = useMemo(() => {
@@ -880,7 +884,7 @@ export default function App() {
       <Sidebar view={view} setView={(next) => { setView(next); setSidebarOpen(false); }} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onAssistant={() => setAssistantOpen(true)} onLogout={logout} userName={userName} demoMode={demoMode} supabaseProjectRef={supabaseProjectRef} billCount={activeData.recurring.filter((bill) => !bill.is_paid).length} />
       <div className="finance-main">
         <header className="finance-topbar"><div className="finance-topbar-left"><button type="button" className="mobile-nav-button" onClick={() => setSidebarOpen(true)} aria-label="Open navigation">☰</button><div><h1>{view === 'overview' ? `Good morning, ${userName}` : currentView.label}</h1><span className={`finance-realtime-status ${demoMode ? 'demo' : realtimeStatus}`} role="status" title={realtimeMessage || realtimeLabel}><i aria-hidden="true" />{realtimeLabel}</span></div></div><div className="finance-topbar-actions"><div className="top-search"><span>⌕</span><input ref={globalSearchRef} aria-label="Search transactions" placeholder="Search your books" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && search.trim()) setView('transactions'); }} /><kbd>⌘K</kbd></div><button type="button" className="top-icon-button" aria-label="Toggle dark mode" onClick={() => setDarkMode((current) => !current)}>{darkMode ? '☼' : '☾'}</button><button type="button" className="top-icon-button notification-trigger" aria-label="Open notifications" onClick={() => setNotificationsOpen((current) => !current)}>♢{activeData.notifications.some((item) => !item.is_read) && <i />}</button><div className="finance-avatar">{userName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}</div></div>{notificationsOpen && <NotificationPanel notifications={activeData.notifications} onClose={() => setNotificationsOpen(false)} onMarkAllRead={markNotificationsRead} />}</header>
-        <main className="finance-content"><div className="content-toolbar"><div><span className="content-eyebrow">{view === 'overview' ? longDateLabel(today) : 'Your financial command center'}</span>{view !== 'overview' && <p className="content-subtitle">Everything you need to make calmer money decisions.</p>}</div><div className="content-actions"><button type="button" className="secondary-button" onClick={() => setAssistantOpen(true)}><span>✦</span> Ask assistant</button><button type="button" className="primary-button" onClick={() => { setTransactionForm({ ...newTransaction(), accountId: activeData.accounts[0]?.id || '', categoryId: activeData.categories.find((item) => item.kind !== 'income')?.id || '' }); setModal('transaction'); }}>+ Add transaction</button></div></div>{dataError && <div className="data-error"><span>!</span>{dataError}<button type="button" onClick={() => currentUserId && refreshData(currentUserId)}>Retry</button></div>}<ImportContextRibbon analysis={importedAnalysis} batches={importedData.batches} onOpen={() => setView('imports')} />{renderView(view, activeData, stats, categorySpend, smartInsights, filteredTransactions, search, transactionFilter, transactionSourceFilter, setSearch, setTransactionFilter, setTransactionSourceFilter, setView, setModal, setTransactionForm, markBillPaid, setConfirmDelete, setConfirmImportDelete, showToast, exportCsv, importedData, handleImportFiles, importLoading, importError, importMessage, handleShopifyImport, handleShopifyStoreDiscovery, shopifySyncLoading, shopifySyncError, shopifySyncMessage)}</main>
+        <main className="finance-content"><div className="content-toolbar"><div><span className="content-eyebrow">{view === 'overview' ? longDateLabel(today) : 'Your financial command center'}</span>{view !== 'overview' && <p className="content-subtitle">Everything you need to make calmer money decisions.</p>}</div><div className="content-actions"><button type="button" className="secondary-button" onClick={() => setAssistantOpen(true)}><span>✦</span> Ask assistant</button><button type="button" className="primary-button" onClick={() => { setTransactionForm({ ...newTransaction(), accountId: activeData.accounts[0]?.id || '', categoryId: activeData.categories.find((item) => item.kind !== 'income')?.id || '' }); setModal('transaction'); }}>+ Add transaction</button></div></div>{dataError && <div className="data-error"><span>!</span>{dataError}<button type="button" onClick={() => currentUserId && refreshData(currentUserId)}>Retry</button></div>}<ImportContextRibbon analysis={importedAnalysis} batches={importedData.batches} onOpen={() => setView('imports')} />{renderView(view, activeData, stats, categorySpend, smartInsights, filteredTransactions, search, transactionFilter, transactionSourceFilter, setSearch, setTransactionFilter, setTransactionSourceFilter, setView, setModal, setTransactionForm, markBillPaid, setConfirmDelete, setConfirmImportDelete, showToast, exportCsv, importedData, handleImportFiles, importLoading, importError, importMessage, handleShopifyImport, handleShopifyStoreDiscovery, currentUserId, shopifySyncLoading, shopifySyncError, shopifySyncMessage)}</main>
       </div>
       {assistantOpen && <AssistantPanel question={assistantQuestion} setQuestion={setAssistantQuestion} answer={assistantAnswer} onAsk={answerAssistant} onClose={() => setAssistantOpen(false)} />}
       {modal === 'transaction' && <TransactionModal form={transactionForm} setForm={setTransactionForm} accounts={activeData.accounts} categories={activeData.categories} onSubmit={addTransaction} onClose={() => setModal(null)} />}
@@ -898,7 +902,7 @@ export default function App() {
   );
 }
 
-function renderView(view: View, data: FinanceData, stats: { balance: number; income: number; expenses: number; savings: number; investmentValue: number; savingsRate: number }, categorySpend: { name: string; color: string; total: number }[], insights: { kind: string; title: string; body: string; icon: string }[], filteredTransactions: FinanceTransaction[], search: string, transactionFilter: 'all' | 'income' | 'expense' | 'transfer', transactionSourceFilter: TransactionSourceFilter, setSearch: (value: string) => void, setTransactionFilter: (value: 'all' | 'income' | 'expense' | 'transfer') => void, setTransactionSourceFilter: (value: TransactionSourceFilter) => void, setView: (value: View) => void, setModal: (value: Modal) => void, setTransactionForm: (value: TransactionForm) => void, markBillPaid: (bill: RecurringPayment) => void, setConfirmDelete: (value: string | null) => void, setConfirmImportDelete: (value: FinanceImportBatch | null) => void, showToast: (value: string) => void, exportCsv: () => void, importedData: ImportData, onImportFiles: (files: File[]) => Promise<boolean>, importLoading: boolean, importError: string, importMessage: string, onShopifyImport: (period: ShopifyImportPeriod) => Promise<boolean>, onShopifyStoreDiscovery: () => Promise<string[]>, shopifySyncLoading: boolean, shopifySyncError: string, shopifySyncMessage: string) {
+function renderView(view: View, data: FinanceData, stats: { balance: number; income: number; expenses: number; savings: number; investmentValue: number; savingsRate: number }, categorySpend: { name: string; color: string; total: number }[], insights: { kind: string; title: string; body: string; icon: string }[], filteredTransactions: FinanceTransaction[], search: string, transactionFilter: 'all' | 'income' | 'expense' | 'transfer', transactionSourceFilter: TransactionSourceFilter, setSearch: (value: string) => void, setTransactionFilter: (value: 'all' | 'income' | 'expense' | 'transfer') => void, setTransactionSourceFilter: (value: TransactionSourceFilter) => void, setView: (value: View) => void, setModal: (value: Modal) => void, setTransactionForm: (value: TransactionForm) => void, markBillPaid: (bill: RecurringPayment) => void, setConfirmDelete: (value: string | null) => void, setConfirmImportDelete: (value: FinanceImportBatch | null) => void, showToast: (value: string) => void, exportCsv: () => void, importedData: ImportData, onImportFiles: (files: File[]) => Promise<boolean>, importLoading: boolean, importError: string, importMessage: string, onShopifyImport: (period: ShopifyImportPeriod, shopifyPageUrl?: string) => Promise<boolean>, onShopifyStoreDiscovery: () => Promise<string[]>, shopifyUserId: string | undefined, shopifySyncLoading: boolean, shopifySyncError: string, shopifySyncMessage: string) {
   switch (view) {
     case 'transactions': return <TransactionsView data={data} transactions={filteredTransactions} search={search} filter={transactionFilter} sourceFilter={transactionSourceFilter} setSearch={setSearch} setFilter={setTransactionFilter} setSourceFilter={setTransactionSourceFilter} setModal={setModal} setTransactionForm={setTransactionForm} setConfirmDelete={setConfirmDelete} />;
     case 'accounts': return <AccountsView data={data} setModal={setModal} />;
@@ -910,7 +914,7 @@ function renderView(view: View, data: FinanceData, stats: { balance: number; inc
     case 'lending': return <LendingView data={data} setModal={setModal} />;
     case 'reports': return <ReportsView data={data} importedData={importedData} exportCsv={exportCsv} setView={setView} />;
     case 'calendar': return <CalendarView data={data} importedData={importedData} />;
-    case 'imports': return <ImportCenterView importedData={importedData} onImportFiles={onImportFiles} onShopifyImport={onShopifyImport} onShopifyStoreDiscovery={onShopifyStoreDiscovery} onDeleteBatch={setConfirmImportDelete} loading={importLoading} error={importError} message={importMessage} shopifySyncLoading={shopifySyncLoading} shopifySyncError={shopifySyncError} shopifySyncMessage={shopifySyncMessage} />;
+    case 'imports': return <ImportCenterView key={shopifyUserId || 'demo'} shopifyUserId={shopifyUserId} importedData={importedData} onImportFiles={onImportFiles} onShopifyImport={onShopifyImport} onShopifyStoreDiscovery={onShopifyStoreDiscovery} onDeleteBatch={setConfirmImportDelete} loading={importLoading} error={importError} message={importMessage} shopifySyncLoading={shopifySyncLoading} shopifySyncError={shopifySyncError} shopifySyncMessage={shopifySyncMessage} />;
     default: return <OverviewView data={data} stats={stats} categorySpend={categorySpend} insights={insights} setView={setView} setModal={setModal} />;
   }
 }
@@ -1029,7 +1033,7 @@ function ReportsView({ data, importedData, exportCsv, setView }: { data: Finance
   </div>;
 }
 
-function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onShopifyStoreDiscovery, onDeleteBatch, loading, error, message, shopifySyncLoading, shopifySyncError, shopifySyncMessage }: { importedData: ImportData; onImportFiles: (files: File[]) => Promise<boolean>; onShopifyImport: (period: ShopifyImportPeriod, storeDomain?: string) => Promise<boolean>; onShopifyStoreDiscovery: () => Promise<string[]>; onDeleteBatch: (batch: FinanceImportBatch) => void; loading: boolean; error: string; message: string; shopifySyncLoading: boolean; shopifySyncError: string; shopifySyncMessage: string }) {
+function ImportCenterView({ shopifyUserId, importedData, onImportFiles, onShopifyImport, onShopifyStoreDiscovery, onDeleteBatch, loading, error, message, shopifySyncLoading, shopifySyncError, shopifySyncMessage }: { shopifyUserId?: string; importedData: ImportData; onImportFiles: (files: File[]) => Promise<boolean>; onShopifyImport: (period: ShopifyImportPeriod, shopifyPageUrl?: string) => Promise<boolean>; onShopifyStoreDiscovery: () => Promise<string[]>; onDeleteBatch: (batch: FinanceImportBatch) => void; loading: boolean; error: string; message: string; shopifySyncLoading: boolean; shopifySyncError: string; shopifySyncMessage: string }) {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [selectionError, setSelectionError] = useState('');
@@ -1037,9 +1041,13 @@ function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onShop
   const [shopifyPeriod, setShopifyPeriod] = useState<ShopifyImportPeriod>('last_month');
   const [shopifyStores, setShopifyStores] = useState<string[]>([]);
   const [shopifyStoresLoading, setShopifyStoresLoading] = useState(false);
-  const [shopifyStoreDomain, setShopifyStoreDomain] = useState(() => {
-    try { return window.sessionStorage.getItem('gcs-books-shopify-store-domain') || ''; } catch { return ''; }
+  const [shopifyPageUrl, setShopifyPageUrl] = useState(() => {
+    try {
+      const storageKey = shopifyPageUrlStorageKey(shopifyUserId);
+      return window.localStorage.getItem(storageKey) || window.sessionStorage.getItem(storageKey) || '';
+    } catch { return ''; }
   });
+  const [shopifyPageUrlError, setShopifyPageUrlError] = useState('');
   const configuredShopifyMode = String(import.meta.env.VITE_SHOPIFY_CONNECTION_MODE || '').trim().toLowerCase();
   const shopifyMode = import.meta.env.DEV ? 'cli' : configuredShopifyMode === 'client_credentials' ? 'client_credentials' : 'oauth';
   const shopifyConnectionTitle = shopifyMode === 'cli'
@@ -1099,9 +1107,19 @@ function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onShop
   const reviewCount = importedData.batches.reduce((sum, batch) => sum + (batch.review_count || 0), 0);
   const requirementStatus = analysis.pnlReady ? 'Complete' : connectedRequirements + '/5 connected';
   const syncShopify = async () => {
-    const storeDomain = shopifyStoreDomain.trim();
-    try { if (storeDomain) window.sessionStorage.setItem('gcs-books-shopify-store-domain', storeDomain); } catch { /* session storage may be unavailable */ }
-    const imported = await onShopifyImport(shopifyPeriod, storeDomain || undefined);
+    const pageUrl = shopifyPageUrl.trim();
+    if (!pageUrl) {
+      setShopifyPageUrlError('Paste your Shopify admin page URL before starting the import.');
+      return;
+    }
+    setShopifyPageUrlError('');
+    try {
+      if (pageUrl) {
+        window.sessionStorage.setItem(shopifyPageUrlStorageKey(shopifyUserId), pageUrl);
+        if (shopifyUserId) window.localStorage.setItem(shopifyPageUrlStorageKey(shopifyUserId), pageUrl);
+      }
+    } catch { /* browser storage may be unavailable */ }
+    const imported = await onShopifyImport(shopifyPeriod, pageUrl || undefined);
     if (imported) setShopifyImportOpen(false);
   };
   return <div className="view-stack import-view">
@@ -1122,7 +1140,7 @@ function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onShop
       <section className="finance-card"><div className="import-table-heading"><div><span className="content-eyebrow">Settlement detail</span><h3>Payout activity</h3><p>Bank references and settlement components are preserved for reconciliation.</p></div><div className="import-table-meta">{analysis.payoutRows} payouts</div></div><div className="import-table payout-table"><div className="import-table-head"><span>Date</span><span>Status / bank reference</span><span>Charges</span><span>Refunds</span><span>Fees</span><span>Total</span></div>{payoutRows.map((row) => <div className="import-table-row" key={row.source_key}><span>{dateLabel(row.payout_date)}</span><span><strong>{row.status}</strong><small>{row.bank_reference}</small></span><span>{moneyExact(row.charges, row.currency)}</span><span>{moneyExact(row.refunds, row.currency)}</span><span>{moneyExact(row.fees, row.currency)}</span><strong>{moneyExact(row.total, row.currency)}</strong></div>)}{!payoutRows.length && <EmptyState title="No payout activity yet" body="Import the Payout activity export or text-based PDF to see settlement rows here." />}</div></section>
     </>}
     {importedData.batches.length > 0 && <section className="finance-card"><CardHeading eyebrow="Import history" title="Shopify source files" />{importedData.batches.map((batch) => <div className="import-history-row" key={batch.id}><span className="file-type-pill">{batch.file_type.toUpperCase()}</span><div><strong>{batch.file_name}</strong><small>{sourceKindLabel(batch.source_kind)} · {dateLabel(batch.imported_at.slice(0, 10))}</small></div><span className="import-history-status">{batch.imported_count} imported{batch.duplicate_count ? ' · ' + batch.duplicate_count + ' skipped' : ''}{batch.review_count ? ' · ' + batch.review_count + ' review' : ''}</span><button className="import-history-delete" type="button" aria-label={'Delete imported file ' + batch.file_name} onClick={() => onDeleteBatch(batch)}>Delete</button></div>)}</section>}
-    {shopifyImportOpen && <div className="modal-backdrop" onClick={() => { if (!shopifySyncLoading) setShopifyImportOpen(false); }}><div className="finance-modal shopify-sync-modal" role="dialog" aria-modal="true" aria-labelledby="shopify-sync-title" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="content-eyebrow">Live Shopify connection</span><h2 id="shopify-sync-title">Import from Shopify</h2><p>Choose a store and reporting period, then we’ll pull the source data into the same P&L, ledger, reports, analytics, and calendar views.</p></div><button type="button" aria-label="Close Shopify import" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>×</button></div><div className="shopify-sync-badge"><span className="shopify-button-mark">S</span><div><strong>{shopifyConnectionTitle}</strong><small>{shopifyConnectionSubcopy}</small></div><span className="shopify-sync-live-dot" /></div><label className="modal-field shopify-store-field"><span>Choose Shopify store</span><input aria-label="Shopify store domain" list="shopify-store-options" value={shopifyStoreDomain} onChange={(event) => setShopifyStoreDomain(event.target.value)} placeholder="your-store.myshopify.com" autoComplete="organization" disabled={shopifySyncLoading} /><datalist id="shopify-store-options">{shopifyStores.map((store) => <option value={store} key={store} />)}</datalist><small>{shopifyStoresLoading ? 'Checking this device for authenticated Shopify CLI stores…' : shopifyStores.length ? 'Choose a detected store or enter another store.myshopify.com domain.' : 'Choose a store at runtime. No store domain is required in environment variables.'}</small></label><label className="modal-field shopify-sync-select"><span>Time period</span><select aria-label="Shopify import time period" value={shopifyPeriod} onChange={(event) => setShopifyPeriod(event.target.value as ShopifyImportPeriod)} disabled={shopifySyncLoading}>{SHOPIFY_IMPORT_PERIODS.map((period) => <option value={period.value} key={period.value}>{period.label} · {period.description}</option>)}</select></label><div className="shopify-sync-help"><span>i</span><p>{shopifyConnectionHelp}</p></div>{shopifySyncError && <div className="shopify-sync-inline-error" role="alert"><span>!</span>{shopifySyncError}</div>}<div className="modal-actions"><button className="secondary-button" type="button" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>Cancel</button><button className="primary-button shopify-sync-submit" type="button" disabled={shopifySyncLoading} onClick={syncShopify}>{shopifySyncLoading ? 'Syncing Shopify…' : 'Start Shopify import ↗'}</button></div></div></div>}
+    {shopifyImportOpen && <div className="modal-backdrop" onClick={() => { if (!shopifySyncLoading) setShopifyImportOpen(false); }}><div className="finance-modal shopify-sync-modal" role="dialog" aria-modal="true" aria-labelledby="shopify-sync-title" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="content-eyebrow">Live Shopify connection</span><h2 id="shopify-sync-title">Import from Shopify</h2><p>Paste your Shopify page URL and choose a reporting period. We’ll continue through the secure store connection and import the result into your books.</p></div><button type="button" aria-label="Close Shopify import" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>×</button></div><div className="shopify-sync-badge"><span className="shopify-button-mark">S</span><div><strong>{shopifyConnectionTitle}</strong><small>{shopifyConnectionSubcopy}</small></div><span className="shopify-sync-live-dot" /></div><label className="modal-field shopify-store-field"><span>Shopify page URL</span><input aria-label="Shopify page URL" aria-invalid={Boolean(shopifyPageUrlError)} list="shopify-store-options" value={shopifyPageUrl} onChange={(event) => { setShopifyPageUrl(event.target.value); setShopifyPageUrlError(''); }} placeholder="https://admin.shopify.com/store/your-store" autoComplete="url" disabled={shopifySyncLoading} /><datalist id="shopify-store-options">{shopifyStores.map((store) => <option value={store} key={store} />)}</datalist><small>{shopifyStoresLoading ? 'Checking this device for authenticated Shopify CLI stores…' : shopifyStores.length ? 'Choose a detected CLI store or paste its Shopify admin page URL.' : 'Paste https://admin.shopify.com/store/your-store or https://your-store.myshopify.com/admin. No store domain environment variable is required.'}</small>{shopifyPageUrlError && <small className="shopify-field-error" role="alert">{shopifyPageUrlError}</small>}</label><label className="modal-field shopify-sync-select"><span>Time period</span><select aria-label="Shopify import time period" value={shopifyPeriod} onChange={(event) => setShopifyPeriod(event.target.value as ShopifyImportPeriod)} disabled={shopifySyncLoading}>{SHOPIFY_IMPORT_PERIODS.map((period) => <option value={period.value} key={period.value}>{period.label} · {period.description}</option>)}</select></label><div className="shopify-sync-help"><span>i</span><p>{shopifyConnectionHelp}</p></div>{shopifySyncError && <div className="shopify-sync-inline-error" role="alert"><span>!</span>{shopifySyncError}</div>}<div className="modal-actions"><button className="secondary-button" type="button" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>Cancel</button><button className="primary-button shopify-sync-submit" type="button" disabled={shopifySyncLoading} onClick={syncShopify}>{shopifySyncLoading ? 'Syncing Shopify…' : 'Start Shopify import ↗'}</button></div></div></div>}
   </div>;
 }
 

@@ -627,6 +627,18 @@
   line-height: 1.4;
 }
 
+.shopify-store-field input[aria-invalid="true"] {
+  border-color: #e6a078;
+  box-shadow: 0 0 0 3px rgba(230, 160, 120, .14);
+}
+
+.shopify-store-field .shopify-field-error {
+  display: block;
+  margin-top: 5px;
+  color: #c56b43;
+  font-weight: 700;
+}
+
 .shopify-sync-select {
   margin-top: 18px;
 }
@@ -1132,6 +1144,15 @@
 
 .finance-app.dark .shopify-store-field small {
   color: #9aaf9e;
+}
+
+.finance-app.dark .shopify-store-field input[aria-invalid="true"] {
+  border-color: #c87955;
+  box-shadow: 0 0 0 3px rgba(200, 121, 85, .16);
+}
+
+.finance-app.dark .shopify-store-field .shopify-field-error {
+  color: #e09b78;
 }
 
 .finance-app.dark .shopify-sync-feedback.success {

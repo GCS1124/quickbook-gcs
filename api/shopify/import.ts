@@ -26,12 +26,13 @@ function errorResponse(error: unknown) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json().catch(() => ({})) as { period?: unknown; storeDomain?: unknown };
+    const body = await request.json().catch(() => ({})) as { period?: unknown; shopifyPageUrl?: unknown; storeDomain?: unknown };
     const period = typeof body.period === 'string' && validPeriods.has(body.period as ShopifyImportPeriod)
       ? body.period as ShopifyImportPeriod
       : null;
     if (!period) return json({ error: 'Choose a valid Shopify import period.', code: 'INVALID_PERIOD' }, 400);
-    const storeDomain = typeof body.storeDomain === 'string' ? body.storeDomain.trim() : undefined;
+    const shopifyPageUrl = typeof body.shopifyPageUrl === 'string' ? body.shopifyPageUrl.trim() : undefined;
+    const storeDomain = shopifyPageUrl || (typeof body.storeDomain === 'string' ? body.storeDomain.trim() : undefined);
     const context = await requireAuthenticatedShopifyRequest(request, storeDomain);
 
     const connection = await resolveShopifyConnection(request, context);

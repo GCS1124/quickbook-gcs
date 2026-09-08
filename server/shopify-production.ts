@@ -9,6 +9,7 @@ import {
 import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   normalizeStoreDomain,
+  normalizeShopifyStoreInput,
   type GraphQLResponse,
   type JsonRecord,
   type ShopifyImportPeriod,
@@ -162,7 +163,7 @@ function bearerToken(request: Request) {
   return match?.[1]?.trim() || null;
 }
 
-export async function requireAuthenticatedShopifyRequest(request: Request, storeDomainOverride?: string): Promise<AuthenticatedShopifyRequest> {
+export async function requireAuthenticatedShopifyRequest(request: Request, storeInput?: string): Promise<AuthenticatedShopifyRequest> {
   const accessToken = bearerToken(request);
   if (!accessToken) throw new ProductionShopifyError('Sign in to import from Shopify.', 401, 'AUTH_REQUIRED');
   const config = getProductionShopifyConfig(request);
@@ -173,11 +174,11 @@ export async function requireAuthenticatedShopifyRequest(request: Request, store
   const { data: { user }, error } = await supabase.auth.getUser(accessToken);
   if (error || !user) throw new ProductionShopifyError('Your Supabase session is no longer valid. Sign in again and retry the Shopify import.', 401, 'AUTH_REQUIRED');
   let storeDomain = config.storeDomain;
-  if (storeDomainOverride) {
+  if (storeInput) {
     try {
-      storeDomain = normalizeStoreDomain(storeDomainOverride);
+      storeDomain = normalizeShopifyStoreInput(storeInput);
     } catch {
-      throw new ProductionShopifyError('Choose a valid Shopify store.myshopify.com domain.', 400, 'SHOPIFY_STORE_INVALID');
+      throw new ProductionShopifyError('Enter a Shopify admin page URL or a valid store.myshopify.com domain.', 400, 'SHOPIFY_STORE_INVALID');
     }
     if (config.connectionMode === 'client_credentials' && !config.allowedStoreDomains.includes(storeDomain)) {
       throw new ProductionShopifyError('That Shopify store is not enabled for this native server connection.', 403, 'SHOPIFY_STORE_NOT_ALLOWED');
