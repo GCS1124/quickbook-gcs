@@ -65,3 +65,7 @@ export async function POST(request: Request) {
     return errorResponse(error);
   }
 }
+
+export function GET() {
+  return json({ error: 'Use POST /api/shopify/import.', code: 'METHOD_NOT_ALLOWED' }, 405);
+}
