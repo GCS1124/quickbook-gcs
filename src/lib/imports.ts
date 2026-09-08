@@ -770,30 +770,33 @@ export function analyzeImportData(data: Pick<ImportData, 'payments' | 'payouts' 
 export async function loadImportData(userId: string): Promise<ImportData> {
   if (!supabase) return emptyImportData;
   const [batches, payments, payouts, orders, products, expenses] = await Promise.all([
-    supabase.from('finance_import_batches').select('*').eq('user_id', userId).order('imported_at', { ascending: false }).limit(20),
-    supabase.from('finance_payment_imports').select('*').eq('user_id', userId).order('transaction_at', { ascending: false }).limit(2000),
-    supabase.from('finance_payouts').select('*').eq('user_id', userId).order('payout_date', { ascending: false }).limit(500),
-    supabase.from('finance_shopify_orders').select('*').eq('user_id', userId).order('order_date', { ascending: false }).limit(2000),
-    supabase.from('finance_shopify_products').select('*').eq('user_id', userId).order('product_title', { ascending: true }).limit(5000),
-    supabase.from('finance_operating_expenses').select('*').eq('user_id', userId).order('expense_date', { ascending: false }).limit(2000),
+    supabase.from('finance_import_batches').select('id,user_id,file_name,file_type,source_kind,file_size,row_count,imported_count,duplicate_count,review_count,total_amount,total_fee,total_net,currency_code,status,imported_at').eq('user_id', userId).order('imported_at', { ascending: false }).limit(20),
+    supabase.from('finance_payment_imports').select('id,batch_id,source_key,transaction_at,transaction_date,event_type,order_id,card_brand,card_source,payout_status,payout_date,payout_id,available_on,amount,fee,net,checkout_id,payment_method_name,presentment_amount,presentment_currency,currency').eq('user_id', userId).order('transaction_at', { ascending: false }).limit(2000),
+    supabase.from('finance_payouts').select('id,batch_id,source_key,payout_date,status,charges,refunds,adjustments,marketplace_sales_tax,advances,reserved_funds,fees,retried_amount,total,currency,bank_reference').eq('user_id', userId).order('payout_date', { ascending: false }).limit(500),
+    supabase.from('finance_shopify_orders').select('id,batch_id,source_key,order_name,order_date,financial_status,currency_code,gross_sales,discounts_amount,returns_amount,shipping_amount,taxes_amount,total_sales,item_quantity,line_items').eq('user_id', userId).order('order_date', { ascending: false }).limit(2000),
+    supabase.from('finance_shopify_products').select('id,batch_id,source_key,sku,product_title,cost_per_item,inventory_quantity,currency_code').eq('user_id', userId).order('product_title', { ascending: true }).limit(100000),
+    supabase.from('finance_operating_expenses').select('id,batch_id,source_key,expense_date,category,description,amount,currency_code').eq('user_id', userId).order('expense_date', { ascending: false }).limit(2000),
   ]);
   const error = [batches, payments, payouts, orders, products, expenses].find((result) => result.error)?.error;
   if (error) throw error;
   return {
     batches: (batches.data ?? []) as FinanceImportBatch[],
-    payments: (payments.data ?? []) as ImportedPayment[],
-    payouts: (payouts.data ?? []) as ImportedPayout[],
+    payments: (payments.data ?? []).map((item) => ({ ...item, raw_data: {} })) as ImportedPayment[],
+    payouts: (payouts.data ?? []).map((item) => ({ ...item, raw_data: {} })) as ImportedPayout[],
     orders: (orders.data ?? []).map((item) => ({
       ...(item as Omit<ShopifyOrder, 'currency'> & { currency_code: string }),
       currency: (item.currency_code || 'USD').toUpperCase(),
+      raw_data: {},
     })) as ShopifyOrder[],
     products: (products.data ?? []).map((item) => ({
       ...(item as Omit<ShopifyProduct, 'currency'> & { currency_code: string }),
       currency: (item.currency_code || 'USD').toUpperCase(),
+      raw_data: {},
     })) as ShopifyProduct[],
     expenses: (expenses.data ?? []).map((item) => ({
       ...(item as Omit<OperatingExpense, 'currency'> & { currency_code: string }),
       currency: (item.currency_code || 'USD').toUpperCase(),
+      raw_data: {},
     })) as OperatingExpense[],
   };
 }
@@ -876,21 +879,23 @@ async function ensureImportCategory(userId: string, name: string, kind: 'income'
 
 const chunk = <T,>(items: T[], size = 250) => Array.from({ length: Math.ceil(items.length / size) }, (_, index) => items.slice(index * size, index * size + size));
 
-// PostgREST encodes every value in an `in` filter into the request URL. Shopify
-// fingerprints are intentionally detailed, so a full-file lookup can exceed
-// the URL size accepted by the API. Keep lookups bounded while preserving the
-// same user-scoped duplicate detection semantics.
-const SOURCE_KEY_LOOKUP_CHUNK_SIZE = 50;
-async function loadExistingSourceKeys(table: 'finance_payment_imports' | 'finance_payouts' | 'finance_shopify_orders' | 'finance_shopify_products' | 'finance_operating_expenses', userId: string, keys: string[]) {
-  if (!supabase) throw new Error('Supabase is not configured.');
-  const existingKeys = new Set<string>();
-  for (const keyChunk of chunk([...new Set(keys)], SOURCE_KEY_LOOKUP_CHUNK_SIZE)) {
-    if (!keyChunk.length) continue;
-    const response = await supabase.from(table).select('source_key').eq('user_id', userId).in('source_key', keyChunk);
+// Let Postgres perform duplicate detection through the existing
+// (user_id, source_key) unique indexes. This avoids one URL-filter request per
+// small group of source keys, which becomes prohibitively slow for large
+// Shopify product exports.
+const IMPORT_INSERT_CHUNK_SIZE = 1000;
+type DedupeImportTable = 'finance_payment_imports' | 'finance_payouts' | 'finance_shopify_orders' | 'finance_shopify_products' | 'finance_operating_expenses';
+async function insertImportRows(client: NonNullable<typeof supabase>, table: DedupeImportTable, rows: Record<string, unknown>[]) {
+  const insertedKeys = new Set<string>();
+  for (const part of chunk(rows, IMPORT_INSERT_CHUNK_SIZE)) {
+    const response = await client
+      .from(table)
+      .upsert(part, { onConflict: 'user_id,source_key', ignoreDuplicates: true })
+      .select('source_key');
     if (response.error) throw response.error;
-    for (const row of response.data ?? []) existingKeys.add(row.source_key as string);
+    for (const row of response.data ?? []) insertedKeys.add(row.source_key as string);
   }
-  return existingKeys;
+  return insertedKeys;
 }
 
 export async function persistParsedImport(userId: string, file: File, parsed: ParsedImport) {
@@ -916,77 +921,61 @@ export async function persistParsedImport(userId: string, file: File, parsed: Pa
   };
   try {
     if (parsed.source_kind === 'shopify_orders') {
-      const keys = parsed.orders.map((item) => item.source_key);
-      const seenKeys = await loadExistingSourceKeys('finance_shopify_orders', userId, keys);
-      const fresh = parsed.orders.filter((item) => { if (seenKeys.has(item.source_key)) return false; seenKeys.add(item.source_key); return true; });
-      for (const part of chunk(fresh)) {
-        const response = await client.from('finance_shopify_orders').insert(part.map((item) => ({
-          user_id: userId,
-          batch_id: batch.id,
-          source_key: item.source_key,
-          order_name: item.order_name,
-          order_date: item.order_date,
-          financial_status: item.financial_status,
-          currency_code: item.currency,
-          gross_sales: item.gross_sales,
-          discounts_amount: item.discounts_amount,
-          returns_amount: item.returns_amount,
-          shipping_amount: item.shipping_amount,
-          taxes_amount: item.taxes_amount,
-          total_sales: item.total_sales,
-          item_quantity: item.item_quantity,
-          line_items: item.line_items,
-          raw_data: item.raw_data,
-        })));
-        if (response.error) throw response.error;
-      }
-      return finishBatch(fresh.length, parsed.orders.length - fresh.length, { importedPayments: 0, importedPayouts: 0, importedOrders: fresh.length, importedProducts: 0, importedExpenses: 0 });
+      const rows = parsed.orders.map((item) => ({
+        user_id: userId,
+        batch_id: batch.id,
+        source_key: item.source_key,
+        order_name: item.order_name,
+        order_date: item.order_date,
+        financial_status: item.financial_status,
+        currency_code: item.currency,
+        gross_sales: item.gross_sales,
+        discounts_amount: item.discounts_amount,
+        returns_amount: item.returns_amount,
+        shipping_amount: item.shipping_amount,
+        taxes_amount: item.taxes_amount,
+        total_sales: item.total_sales,
+        item_quantity: item.item_quantity,
+        line_items: item.line_items,
+        raw_data: item.raw_data,
+      }));
+      const insertedKeys = await insertImportRows(client, 'finance_shopify_orders', rows);
+      return finishBatch(insertedKeys.size, parsed.orders.length - insertedKeys.size, { importedPayments: 0, importedPayouts: 0, importedOrders: insertedKeys.size, importedProducts: 0, importedExpenses: 0 });
     }
     if (parsed.source_kind === 'shopify_products') {
-      const keys = parsed.products.map((item) => item.source_key);
-      const seenKeys = await loadExistingSourceKeys('finance_shopify_products', userId, keys);
-      const fresh = parsed.products.filter((item) => { if (seenKeys.has(item.source_key)) return false; seenKeys.add(item.source_key); return true; });
-      for (const part of chunk(fresh)) {
-        const response = await client.from('finance_shopify_products').insert(part.map((item) => ({
-          user_id: userId,
-          batch_id: batch.id,
-          source_key: item.source_key,
-          sku: item.sku,
-          product_title: item.product_title,
-          cost_per_item: item.cost_per_item,
-          inventory_quantity: item.inventory_quantity,
-          currency_code: item.currency,
-          raw_data: item.raw_data,
-        })));
-        if (response.error) throw response.error;
-      }
-      return finishBatch(fresh.length, parsed.products.length - fresh.length, { importedPayments: 0, importedPayouts: 0, importedOrders: 0, importedProducts: fresh.length, importedExpenses: 0 });
+      const rows = parsed.products.map((item) => ({
+        user_id: userId,
+        batch_id: batch.id,
+        source_key: item.source_key,
+        sku: item.sku,
+        product_title: item.product_title,
+        cost_per_item: item.cost_per_item,
+        inventory_quantity: item.inventory_quantity,
+        currency_code: item.currency,
+        raw_data: item.raw_data,
+      }));
+      const insertedKeys = await insertImportRows(client, 'finance_shopify_products', rows);
+      return finishBatch(insertedKeys.size, parsed.products.length - insertedKeys.size, { importedPayments: 0, importedPayouts: 0, importedOrders: 0, importedProducts: insertedKeys.size, importedExpenses: 0 });
     }
     if (parsed.source_kind === 'operating_expenses') {
-      const keys = parsed.expenses.map((item) => item.source_key);
-      const seenKeys = await loadExistingSourceKeys('finance_operating_expenses', userId, keys);
-      const fresh = parsed.expenses.filter((item) => { if (seenKeys.has(item.source_key)) return false; seenKeys.add(item.source_key); return true; });
-      for (const part of chunk(fresh)) {
-        const response = await client.from('finance_operating_expenses').insert(part.map((item) => ({
-          user_id: userId,
-          batch_id: batch.id,
-          source_key: item.source_key,
-          expense_date: item.expense_date,
-          category: item.category,
-          description: item.description,
-          amount: item.amount,
-          currency_code: item.currency,
-          raw_data: item.raw_data,
-        })));
-        if (response.error) throw response.error;
-      }
-      return finishBatch(fresh.length, parsed.expenses.length - fresh.length, { importedPayments: 0, importedPayouts: 0, importedOrders: 0, importedProducts: 0, importedExpenses: fresh.length });
+      const rows = parsed.expenses.map((item) => ({
+        user_id: userId,
+        batch_id: batch.id,
+        source_key: item.source_key,
+        expense_date: item.expense_date,
+        category: item.category,
+        description: item.description,
+        amount: item.amount,
+        currency_code: item.currency,
+        raw_data: item.raw_data,
+      }));
+      const insertedKeys = await insertImportRows(client, 'finance_operating_expenses', rows);
+      return finishBatch(insertedKeys.size, parsed.expenses.length - insertedKeys.size, { importedPayments: 0, importedPayouts: 0, importedOrders: 0, importedProducts: 0, importedExpenses: insertedKeys.size });
     }
     if (parsed.source_kind === 'shopify_payment_transactions' || parsed.source_kind === 'payment_transactions') {
-      const keys = parsed.payments.map((item) => item.source_key);
-      const seenKeys = await loadExistingSourceKeys('finance_payment_imports', userId, keys);
-      const fresh = parsed.payments.filter((item) => { if (seenKeys.has(item.source_key)) return false; seenKeys.add(item.source_key); return true; });
-      for (const part of chunk(fresh)) { const response = await client.from('finance_payment_imports').insert(part.map((item) => ({ ...item, user_id: userId, batch_id: batch.id }))); if (response.error) throw response.error; }
+      const rows = parsed.payments.map((item) => ({ ...item, user_id: userId, batch_id: batch.id }));
+      const insertedKeys = await insertImportRows(client, 'finance_payment_imports', rows);
+      const fresh = parsed.payments.filter((item) => insertedKeys.has(item.source_key));
       if (fresh.length) {
         const accountId = await ensureImportAccount(userId, parsed.payments[0]?.currency || analysis.currency || 'USD');
         const incomeCategoryId = await ensureImportCategory(userId, 'Payment revenue', 'income', '#82d84c', '↙');
@@ -997,13 +986,11 @@ export async function persistParsedImport(userId: string, file: File, parsed: Pa
         });
         for (const part of chunk(transactions)) { const response = await client.from('finance_transactions').upsert(part, { onConflict: 'user_id,external_source_key', ignoreDuplicates: true }); if (response.error) throw response.error; }
       }
-      return finishBatch(fresh.length, parsed.payments.length - fresh.length, { importedPayments: fresh.length, importedPayouts: 0, importedOrders: 0, importedProducts: 0, importedExpenses: 0 });
+      return finishBatch(insertedKeys.size, parsed.payments.length - insertedKeys.size, { importedPayments: insertedKeys.size, importedPayouts: 0, importedOrders: 0, importedProducts: 0, importedExpenses: 0 });
     }
-    const keys = parsed.payouts.map((item) => item.source_key);
-    const seenKeys = await loadExistingSourceKeys('finance_payouts', userId, keys);
-    const fresh = parsed.payouts.filter((item) => { if (seenKeys.has(item.source_key)) return false; seenKeys.add(item.source_key); return true; });
-    for (const part of chunk(fresh)) { const response = await client.from('finance_payouts').insert(part.map((item) => ({ ...item, user_id: userId, batch_id: batch.id }))); if (response.error) throw response.error; }
-    return finishBatch(fresh.length, parsed.payouts.length - fresh.length, { importedPayments: 0, importedPayouts: fresh.length, importedOrders: 0, importedProducts: 0, importedExpenses: 0 });
+    const rows = parsed.payouts.map((item) => ({ ...item, user_id: userId, batch_id: batch.id }));
+    const insertedKeys = await insertImportRows(client, 'finance_payouts', rows);
+    return finishBatch(insertedKeys.size, parsed.payouts.length - insertedKeys.size, { importedPayments: 0, importedPayouts: insertedKeys.size, importedOrders: 0, importedProducts: 0, importedExpenses: 0 });
   } catch (error) {
     await Promise.all([
       client.from('finance_payment_imports').delete().eq('user_id', userId).eq('batch_id', batch.id),

@@ -76,6 +76,8 @@ const views: { id: View; label: string; icon: string; group: string }[] = [
 const emptyData: FinanceData = { accounts: [], categories: [], transactions: [], budgets: [], goals: [], recurring: [], investments: [], loans: [], splits: [], notifications: [] };
 const today = new Date();
 const MAX_IMPORT_FILE_SIZE = 25 * 1024 * 1024;
+const IMPORT_DATA_TIMEOUT_MS = 30_000;
+const IMPORT_PERSIST_TIMEOUT_MS = 5 * 60_000;
 const localDatePart = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 const dateOffset = (days: number) => { const d = new Date(today); d.setDate(d.getDate() + days); return localDatePart(d); };
 const importFileKey = (file: File) => `${file.name}:${file.size}:${file.lastModified}`;
@@ -255,7 +257,7 @@ export default function App() {
       }
       setData(result);
       try {
-        setImportedData(await withTimeout(loadImportData(userId), 12000));
+        setImportedData(await withTimeout(loadImportData(userId), IMPORT_DATA_TIMEOUT_MS));
       } catch (error) {
         setImportedData(emptyImportData);
         setDataError(`Finance data loaded, but imported records are temporarily unavailable: ${describeError(error, 'Please retry shortly.')}`);
@@ -551,10 +553,10 @@ export default function App() {
       } else if (supabase && currentUserId) {
         let importedPayments = 0; let importedPayouts = 0; let importedOrders = 0; let importedProducts = 0; let importedExpenses = 0; let duplicates = 0; let reviewCount = 0;
         for (let index = 0; index < parsedFiles.length; index += 1) {
-          const result = await withTimeout(persistParsedImport(currentUserId, files[index], parsedFiles[index]), 30000);
+          const result = await withTimeout(persistParsedImport(currentUserId, files[index], parsedFiles[index]), IMPORT_PERSIST_TIMEOUT_MS);
           importedPayments += result.importedPayments; importedPayouts += result.importedPayouts; importedOrders += result.importedOrders; importedProducts += result.importedProducts; importedExpenses += result.importedExpenses; duplicates += result.duplicateCount; reviewCount += result.reviewCount;
         }
-        setImportedData(await withTimeout(loadImportData(currentUserId), 12000));
+        setImportedData(await withTimeout(loadImportData(currentUserId), IMPORT_DATA_TIMEOUT_MS));
         await refreshData(currentUserId);
         const sourceSummary = [
           importedOrders ? `${importedOrders} orders` : '',
