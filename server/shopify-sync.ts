@@ -122,7 +122,7 @@ const API_VERSION_DEFAULT = '2026-07';
 const CLI_TIMEOUT_MS = 120_000;
 const CLI_DISCOVERY_TIMEOUT_MS = 20_000;
 const AUTH_TIMEOUT_MS = 300_000;
-const SHOPIFY_AUTH_SCOPES = 'read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments';
+const SHOPIFY_AUTH_SCOPES = 'read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments_accounts,read_shopify_payments_payouts';
 const MAX_PAGES = 1_000;
 const PERIOD_LABELS: Record<ShopifyImportPeriod, string> = {
   last_month: 'previous complete calendar month',

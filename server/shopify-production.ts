@@ -17,7 +17,7 @@ import {
 } from './shopify-sync.js';
 
 const DEFAULT_API_VERSION = '2026-07';
-const DEFAULT_SCOPES = 'read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments';
+const DEFAULT_SCOPES = 'read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments_accounts,read_shopify_payments_payouts';
 const OAUTH_STATE_COOKIE = 'gcs-books-shopify-oauth-state';
 const PENDING_CONNECTION_COOKIE = 'gcs-books-shopify-pending';
 const OAUTH_STATE_TTL_SECONDS = 10 * 60;
