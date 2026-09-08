@@ -25,7 +25,7 @@ The import center now includes **Import from Shopify**. It asks only for the rep
 
 This bridge is intentionally server-side: no Admin token is sent to the browser. During local development, the request is handled by the Vite middleware and the CLI authorizes the current GCS Books user on first use. Configure the local store domain once:
 
-1. Copy `.env.example` to `.env.local` and set `SHOPIFY_STORE_DOMAIN=your-store.myshopify.com`.
+1. Copy `.env.example` to `.env.local` and set `SHOPIFY_STORE_DOMAIN=your-store.myshopify.com` for the local CLI bridge.
 2. Start the app with `npm run dev`, sign in, open Shopify import center, click **Import from Shopify**, and choose **Last month**, **Last 3 months**, **Last 6 months**, **Last 1 year**, or **Lifetime**. If this user/store pair is not authorized yet, the button starts `shopify store auth`, opens Shopify’s approval page, and continues the import after approval. There is no separate pre-auth command.
 
 The first-use authorization requests `read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments`. Set `SHOPIFY_CLI_SCOPES` only if the store’s approved permissions need a deliberate override. The server keeps the active CLI session associated with the signed-in user and serializes user switches so one user’s import cannot run concurrently on another user’s CLI session. See the official [store auth](https://shopify.dev/docs/api/shopify-cli/store/store-auth) and [store execute](https://shopify.dev/docs/api/shopify-cli/store/store-execute) references.
@@ -39,8 +39,10 @@ For a no-approval native server connection on Vercel, use `SHOPIFY_CONNECTION_MO
 Create a Shopify standalone/API-only app, register `https://quickbook-gcs.vercel.app/api/shopify/oauth/callback` as an allowed redirect URL, and add these server-only variables to the Vercel Production environment before deploying:
 
 ```ini
-SHOPIFY_STORE_DOMAIN=your-store.myshopify.com
 SHOPIFY_CONNECTION_MODE=oauth
+# Optional default store. If omitted, the signed-in user chooses a store in
+# the live import dialog at runtime.
+# SHOPIFY_STORE_DOMAIN=your-store.myshopify.com
 SHOPIFY_APP_CLIENT_ID=your-shopify-app-client-id
 SHOPIFY_APP_CLIENT_SECRET=your-shopify-app-client-secret
 SHOPIFY_APP_REDIRECT_URI=https://quickbook-gcs.vercel.app/api/shopify/oauth/callback
@@ -48,7 +50,7 @@ SHOPIFY_TOKEN_ENCRYPTION_KEY=a-long-random-secret
 SHOPIFY_OAUTH_STATE_SECRET=a-different-long-random-secret
 ```
 
-For the no-approval Vercel mode, set `SHOPIFY_CONNECTION_MODE=client_credentials` and add `VITE_SHOPIFY_CONNECTION_MODE=client_credentials` as a public build variable so the import dialog describes the active connection. The OAuth redirect and state secret are not needed by the client-credentials mode, but the store domain, app client ID/secret, Supabase variables, and token-encryption secret are still required. Never expose the client secret or encryption secret through `VITE_*` or `NEXT_PUBLIC_*`.
+For the no-approval Vercel mode, set `SHOPIFY_CONNECTION_MODE=client_credentials` and add `VITE_SHOPIFY_CONNECTION_MODE=client_credentials` as a public build variable so the import dialog describes the active connection. The store domain may be omitted from Vercel because the user can choose it at runtime; the app client ID/secret, Supabase variables, and token-encryption secret are still required. The OAuth redirect and state secret are not needed by the client-credentials mode. Never expose the client secret or encryption secret through `VITE_*` or `NEXT_PUBLIC_*`.
 
 Never prefix server-only values with `VITE_` or `NEXT_PUBLIC_`. The client secret and Shopify access tokens stay in the Vercel function and the encrypted Supabase `finance_shopify_connections` table. Apply the latest migration before the first production import. Both production modes send the resulting access token only from the server in the `X-Shopify-Access-Token` header.
 

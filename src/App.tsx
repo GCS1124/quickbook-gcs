@@ -239,7 +239,7 @@ export default function App() {
   const userName = demoMode ? 'Shadma' : String(session?.user.user_metadata?.full_name || session?.user.email?.split('@')[0] || 'there');
   const currentUserId = session?.user.id;
   const globalSearchRef = useRef<HTMLInputElement>(null);
-  const shopifyImportHandlerRef = useRef<((period: ShopifyImportPeriod) => Promise<boolean>) | null>(null);
+  const shopifyImportHandlerRef = useRef<((period: ShopifyImportPeriod, storeDomain?: string) => Promise<boolean>) | null>(null);
   const shopifyOAuthResumeRef = useRef<string | null>(null);
 
   const refreshData = useCallback(async (userId: string, options: { background?: boolean } = {}) => {
@@ -575,7 +575,7 @@ export default function App() {
     }
   }
 
-  async function handleShopifyImport(period: ShopifyImportPeriod): Promise<boolean> {
+  async function handleShopifyImport(period: ShopifyImportPeriod, storeDomain?: string): Promise<boolean> {
     setShopifySyncLoading(true);
     setShopifySyncError('');
     setShopifySyncMessage('');
@@ -594,12 +594,15 @@ export default function App() {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${activeSession.access_token}` },
-        body: JSON.stringify({ period }),
+        body: JSON.stringify({ period, ...(storeDomain ? { storeDomain } : {}) }),
       }), 900_000, 'Shopify authorization/import timed out. Finish the Shopify approval flow or try again.');
       const payload = await response.json().catch(() => ({})) as ShopifySyncResponse;
       if (!response.ok) {
         if (payload.authorizationUrl && (payload.code === 'SHOPIFY_AUTH_REQUIRED' || payload.code === 'SHOPIFY_REAUTH_REQUIRED')) {
-          try { window.sessionStorage.setItem('gcs-books-shopify-period', period); } catch { /* session storage may be unavailable */ }
+          try {
+            window.sessionStorage.setItem('gcs-books-shopify-period', period);
+            if (storeDomain) window.sessionStorage.setItem('gcs-books-shopify-store-domain', storeDomain);
+          } catch { /* session storage may be unavailable */ }
           window.location.assign(payload.authorizationUrl);
           return false;
         }
@@ -638,11 +641,13 @@ export default function App() {
     if (!session?.user.id) return;
     const validPeriod = params.get('period');
     const period: ShopifyImportPeriod = validPeriod === 'last_3_months' || validPeriod === 'last_6_months' || validPeriod === 'last_1_year' || validPeriod === 'lifetime' ? validPeriod : 'last_month';
+    let storeDomain: string | undefined;
+    try { storeDomain = window.sessionStorage.getItem('gcs-books-shopify-store-domain') || undefined; } catch { /* session storage may be unavailable */ }
     const resumeKey = `${session.user.id}:${period}`;
     if (shopifyOAuthResumeRef.current === resumeKey) return;
     shopifyOAuthResumeRef.current = resumeKey;
     window.history.replaceState({}, '', `${window.location.pathname}?view=imports`);
-    window.setTimeout(() => { void shopifyImportHandlerRef.current?.(period); }, 0);
+    window.setTimeout(() => { void shopifyImportHandlerRef.current?.(period, storeDomain); }, 0);
   }, [session?.user.id]);
 
   const stats = useMemo(() => {
@@ -1005,12 +1010,15 @@ function ReportsView({ data, importedData, exportCsv, setView }: { data: Finance
   </div>;
 }
 
-function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onDeleteBatch, loading, error, message, shopifySyncLoading, shopifySyncError, shopifySyncMessage }: { importedData: ImportData; onImportFiles: (files: File[]) => Promise<boolean>; onShopifyImport: (period: ShopifyImportPeriod) => Promise<boolean>; onDeleteBatch: (batch: FinanceImportBatch) => void; loading: boolean; error: string; message: string; shopifySyncLoading: boolean; shopifySyncError: string; shopifySyncMessage: string }) {
+function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onDeleteBatch, loading, error, message, shopifySyncLoading, shopifySyncError, shopifySyncMessage }: { importedData: ImportData; onImportFiles: (files: File[]) => Promise<boolean>; onShopifyImport: (period: ShopifyImportPeriod, storeDomain?: string) => Promise<boolean>; onDeleteBatch: (batch: FinanceImportBatch) => void; loading: boolean; error: string; message: string; shopifySyncLoading: boolean; shopifySyncError: string; shopifySyncMessage: string }) {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [selectionError, setSelectionError] = useState('');
   const [shopifyImportOpen, setShopifyImportOpen] = useState(false);
   const [shopifyPeriod, setShopifyPeriod] = useState<ShopifyImportPeriod>('last_month');
+  const [shopifyStoreDomain, setShopifyStoreDomain] = useState(() => {
+    try { return window.sessionStorage.getItem('gcs-books-shopify-store-domain') || ''; } catch { return ''; }
+  });
   const configuredShopifyMode = String(import.meta.env.VITE_SHOPIFY_CONNECTION_MODE || '').trim().toLowerCase();
   const shopifyMode = import.meta.env.DEV ? 'cli' : configuredShopifyMode === 'client_credentials' ? 'client_credentials' : 'oauth';
   const shopifyConnectionTitle = shopifyMode === 'cli'
@@ -1058,7 +1066,12 @@ function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onDele
   const payoutRows = importedData.payouts.slice(0, 20);
   const reviewCount = importedData.batches.reduce((sum, batch) => sum + (batch.review_count || 0), 0);
   const requirementStatus = analysis.pnlReady ? 'Complete' : connectedRequirements + '/5 connected';
-  const syncShopify = async () => { const imported = await onShopifyImport(shopifyPeriod); if (imported) setShopifyImportOpen(false); };
+  const syncShopify = async () => {
+    const storeDomain = shopifyStoreDomain.trim();
+    try { if (storeDomain) window.sessionStorage.setItem('gcs-books-shopify-store-domain', storeDomain); } catch { /* session storage may be unavailable */ }
+    const imported = await onShopifyImport(shopifyPeriod, storeDomain || undefined);
+    if (imported) setShopifyImportOpen(false);
+  };
   return <div className="view-stack import-view">
     <section className="module-header"><div><span className="content-eyebrow">Shopify data, connected end to end</span><h2>Shopify import center</h2><p>Sync live Shopify records for a reporting period or upload the complete export pack for a holistic profit and loss.</p></div><div className="import-header-actions"><button type="button" className="primary-button shopify-sync-button" onClick={() => setShopifyImportOpen(true)} disabled={shopifySyncLoading}><span className="shopify-button-mark">S</span>{shopifySyncLoading ? 'Syncing Shopify…' : 'Import from Shopify ↗'}</button><div className="import-source-badge"><span>5 FILE PACK</span><small>{requirementStatus}</small></div></div></section>
     {shopifySyncError && <div className="shopify-sync-feedback error" role="alert"><span>!</span><div><strong>Shopify sync needs attention</strong><p>{shopifySyncError}</p></div></div>}
@@ -1077,7 +1090,7 @@ function ImportCenterView({ importedData, onImportFiles, onShopifyImport, onDele
       <section className="finance-card"><div className="import-table-heading"><div><span className="content-eyebrow">Settlement detail</span><h3>Payout activity</h3><p>Bank references and settlement components are preserved for reconciliation.</p></div><div className="import-table-meta">{analysis.payoutRows} payouts</div></div><div className="import-table payout-table"><div className="import-table-head"><span>Date</span><span>Status / bank reference</span><span>Charges</span><span>Refunds</span><span>Fees</span><span>Total</span></div>{payoutRows.map((row) => <div className="import-table-row" key={row.source_key}><span>{dateLabel(row.payout_date)}</span><span><strong>{row.status}</strong><small>{row.bank_reference}</small></span><span>{moneyExact(row.charges, row.currency)}</span><span>{moneyExact(row.refunds, row.currency)}</span><span>{moneyExact(row.fees, row.currency)}</span><strong>{moneyExact(row.total, row.currency)}</strong></div>)}{!payoutRows.length && <EmptyState title="No payout activity yet" body="Import the Payout activity export or text-based PDF to see settlement rows here." />}</div></section>
     </>}
     {importedData.batches.length > 0 && <section className="finance-card"><CardHeading eyebrow="Import history" title="Shopify source files" />{importedData.batches.map((batch) => <div className="import-history-row" key={batch.id}><span className="file-type-pill">{batch.file_type.toUpperCase()}</span><div><strong>{batch.file_name}</strong><small>{sourceKindLabel(batch.source_kind)} · {dateLabel(batch.imported_at.slice(0, 10))}</small></div><span className="import-history-status">{batch.imported_count} imported{batch.duplicate_count ? ' · ' + batch.duplicate_count + ' skipped' : ''}{batch.review_count ? ' · ' + batch.review_count + ' review' : ''}</span><button className="import-history-delete" type="button" aria-label={'Delete imported file ' + batch.file_name} onClick={() => onDeleteBatch(batch)}>Delete</button></div>)}</section>}
-    {shopifyImportOpen && <div className="modal-backdrop" onClick={() => { if (!shopifySyncLoading) setShopifyImportOpen(false); }}><div className="finance-modal shopify-sync-modal" role="dialog" aria-modal="true" aria-labelledby="shopify-sync-title" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="content-eyebrow">Live Shopify connection</span><h2 id="shopify-sync-title">Import from Shopify</h2><p>Choose a reporting period and we’ll pull the source data into the same P&L, ledger, reports, analytics, and calendar views.</p></div><button type="button" aria-label="Close Shopify import" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>×</button></div><div className="shopify-sync-badge"><span className="shopify-button-mark">S</span><div><strong>{shopifyConnectionTitle}</strong><small>{shopifyConnectionSubcopy}</small></div><span className="shopify-sync-live-dot" /></div><label className="modal-field shopify-sync-select"><span>Time period</span><select aria-label="Shopify import time period" value={shopifyPeriod} onChange={(event) => setShopifyPeriod(event.target.value as ShopifyImportPeriod)} disabled={shopifySyncLoading}>{SHOPIFY_IMPORT_PERIODS.map((period) => <option value={period.value} key={period.value}>{period.label} · {period.description}</option>)}</select></label><div className="shopify-sync-help"><span>i</span><p>{shopifyConnectionHelp}</p></div>{shopifySyncError && <div className="shopify-sync-inline-error" role="alert"><span>!</span>{shopifySyncError}</div>}<div className="modal-actions"><button className="secondary-button" type="button" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>Cancel</button><button className="primary-button shopify-sync-submit" type="button" disabled={shopifySyncLoading} onClick={syncShopify}>{shopifySyncLoading ? 'Syncing Shopify…' : 'Start Shopify import ↗'}</button></div></div></div>}
+    {shopifyImportOpen && <div className="modal-backdrop" onClick={() => { if (!shopifySyncLoading) setShopifyImportOpen(false); }}><div className="finance-modal shopify-sync-modal" role="dialog" aria-modal="true" aria-labelledby="shopify-sync-title" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="content-eyebrow">Live Shopify connection</span><h2 id="shopify-sync-title">Import from Shopify</h2><p>Choose a reporting period and we’ll pull the source data into the same P&L, ledger, reports, analytics, and calendar views.</p></div><button type="button" aria-label="Close Shopify import" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>×</button></div><div className="shopify-sync-badge"><span className="shopify-button-mark">S</span><div><strong>{shopifyConnectionTitle}</strong><small>{shopifyConnectionSubcopy}</small></div><span className="shopify-sync-live-dot" /></div>{shopifyMode !== 'cli' && <label className="modal-field shopify-store-field"><span>Shopify store</span><input aria-label="Shopify store domain" value={shopifyStoreDomain} onChange={(event) => setShopifyStoreDomain(event.target.value)} placeholder="your-store.myshopify.com" autoComplete="organization" disabled={shopifySyncLoading} /><small>Choose a store at runtime. Leave blank only if this GCS Books user already has a saved Shopify connection.</small></label>}<label className="modal-field shopify-sync-select"><span>Time period</span><select aria-label="Shopify import time period" value={shopifyPeriod} onChange={(event) => setShopifyPeriod(event.target.value as ShopifyImportPeriod)} disabled={shopifySyncLoading}>{SHOPIFY_IMPORT_PERIODS.map((period) => <option value={period.value} key={period.value}>{period.label} · {period.description}</option>)}</select></label><div className="shopify-sync-help"><span>i</span><p>{shopifyConnectionHelp}</p></div>{shopifySyncError && <div className="shopify-sync-inline-error" role="alert"><span>!</span>{shopifySyncError}</div>}<div className="modal-actions"><button className="secondary-button" type="button" disabled={shopifySyncLoading} onClick={() => setShopifyImportOpen(false)}>Cancel</button><button className="primary-button shopify-sync-submit" type="button" disabled={shopifySyncLoading} onClick={syncShopify}>{shopifySyncLoading ? 'Syncing Shopify…' : 'Start Shopify import ↗'}</button></div></div></div>}
   </div>;
 }
 

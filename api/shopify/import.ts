@@ -26,16 +26,17 @@ function errorResponse(error: unknown) {
 
 export async function POST(request: Request) {
   try {
-    const context = await requireAuthenticatedShopifyRequest(request);
-    const body = await request.json().catch(() => ({})) as { period?: unknown };
+    const body = await request.json().catch(() => ({})) as { period?: unknown; storeDomain?: unknown };
     const period = typeof body.period === 'string' && validPeriods.has(body.period as ShopifyImportPeriod)
       ? body.period as ShopifyImportPeriod
       : null;
     if (!period) return json({ error: 'Choose a valid Shopify import period.', code: 'INVALID_PERIOD' }, 400);
+    const storeDomain = typeof body.storeDomain === 'string' ? body.storeDomain.trim() : undefined;
+    const context = await requireAuthenticatedShopifyRequest(request, storeDomain);
 
     const connection = await resolveShopifyConnection(request, context);
     if (!connection) {
-      const authorization = beginShopifyOAuth(request, context.userId, period);
+      const authorization = beginShopifyOAuth(request, context.userId, period, context.storeDomain);
       return json({
         error: 'Connect Shopify once to start importing for this GCS Books user.',
         code: 'SHOPIFY_AUTH_REQUIRED',
@@ -68,7 +69,7 @@ export async function POST(request: Request) {
       }
       if (context.config.connectionMode === 'client_credentials') throw error;
       if (error instanceof ProductionShopifyError && error.code === 'SHOPIFY_REAUTH_REQUIRED') {
-        const authorization = beginShopifyOAuth(request, context.userId, period);
+        const authorization = beginShopifyOAuth(request, context.userId, period, context.storeDomain);
         return json({
           error: error.message,
           code: error.code,

@@ -37,7 +37,7 @@ export class ProductionShopifyError extends Error {
 }
 
 export type ProductionShopifyConfig = {
-  storeDomain: string;
+  storeDomain: string | null;
   apiVersion: string;
   scopes: string;
   connectionMode: ShopifyConnectionMode;
@@ -53,6 +53,7 @@ export type ProductionShopifyConfig = {
 export type AuthenticatedShopifyRequest = {
   accessToken: string;
   userId: string;
+  storeDomain: string | null;
   config: ProductionShopifyConfig;
   supabase: SupabaseClient;
 };
@@ -119,7 +120,6 @@ export function getProductionShopifyConfig(request?: Request): ProductionShopify
   missingConfig([
     ...(!supabaseUrl ? ['VITE_SUPABASE_URL'] : []),
     ...(!supabasePublishableKey ? ['VITE_SUPABASE_PUBLISHABLE_KEY'] : []),
-    ...(!storeDomainValue ? ['SHOPIFY_STORE_DOMAIN'] : []),
     ...(!clientId ? ['SHOPIFY_APP_CLIENT_ID'] : []),
     ...(!clientSecret ? ['SHOPIFY_APP_CLIENT_SECRET'] : []),
     ...(!tokenEncryptionSecret ? ['SHOPIFY_TOKEN_ENCRYPTION_KEY'] : []),
@@ -127,11 +127,13 @@ export function getProductionShopifyConfig(request?: Request): ProductionShopify
     ...(connectionMode === 'oauth' && !redirectUri ? ['SHOPIFY_APP_REDIRECT_URI'] : []),
   ]);
 
-  let storeDomain: string;
-  try {
-    storeDomain = normalizeStoreDomain(storeDomainValue);
-  } catch {
-    throw new ProductionShopifyError('SHOPIFY_STORE_DOMAIN must be a valid store.myshopify.com domain.', 503, 'SHOPIFY_NOT_CONFIGURED');
+  let storeDomain: string | null = null;
+  if (storeDomainValue) {
+    try {
+      storeDomain = normalizeStoreDomain(storeDomainValue);
+    } catch {
+      throw new ProductionShopifyError('SHOPIFY_STORE_DOMAIN must be a valid store.myshopify.com domain.', 503, 'SHOPIFY_NOT_CONFIGURED');
+    }
   }
 
   return {
@@ -155,7 +157,7 @@ function bearerToken(request: Request) {
   return match?.[1]?.trim() || null;
 }
 
-export async function requireAuthenticatedShopifyRequest(request: Request): Promise<AuthenticatedShopifyRequest> {
+export async function requireAuthenticatedShopifyRequest(request: Request, storeDomainOverride?: string): Promise<AuthenticatedShopifyRequest> {
   const accessToken = bearerToken(request);
   if (!accessToken) throw new ProductionShopifyError('Sign in to import from Shopify.', 401, 'AUTH_REQUIRED');
   const config = getProductionShopifyConfig(request);
@@ -165,7 +167,15 @@ export async function requireAuthenticatedShopifyRequest(request: Request): Prom
   });
   const { data: { user }, error } = await supabase.auth.getUser(accessToken);
   if (error || !user) throw new ProductionShopifyError('Your Supabase session is no longer valid. Sign in again and retry the Shopify import.', 401, 'AUTH_REQUIRED');
-  return { accessToken, userId: user.id, config, supabase };
+  let storeDomain = config.storeDomain;
+  if (storeDomainOverride) {
+    try {
+      storeDomain = normalizeStoreDomain(storeDomainOverride);
+    } catch {
+      throw new ProductionShopifyError('Choose a valid Shopify store.myshopify.com domain.', 400, 'SHOPIFY_STORE_INVALID');
+    }
+  }
+  return { accessToken, userId: user.id, storeDomain, config, supabase };
 }
 
 function base64Url(value: Uint8Array | string) {
@@ -249,16 +259,18 @@ export function clearShopifyOAuthCookies(request: Request) {
   ];
 }
 
-export function beginShopifyOAuth(request: Request, userId: string, period: ShopifyImportPeriod) {
+export function beginShopifyOAuth(request: Request, userId: string, period: ShopifyImportPeriod, storeDomainOverride?: string | null) {
   const config = getProductionShopifyConfig(request);
+  const storeDomain = storeDomainOverride || config.storeDomain;
+  if (!storeDomain) throw new ProductionShopifyError('Choose your Shopify store before starting the import.', 400, 'SHOPIFY_STORE_REQUIRED');
   const state = signState({
     userId,
-    storeDomain: config.storeDomain,
+    storeDomain,
     period,
     nonce: base64Url(randomBytes(18)),
     expiresAt: Date.now() + OAUTH_STATE_TTL_SECONDS * 1000,
   }, config.oauthStateSecret);
-  const authorizationUrl = new URL(`https://${config.storeDomain}/admin/oauth/authorize`);
+  const authorizationUrl = new URL(`https://${storeDomain}/admin/oauth/authorize`);
   authorizationUrl.searchParams.set('client_id', config.clientId);
   authorizationUrl.searchParams.set('scope', config.scopes);
   authorizationUrl.searchParams.set('redirect_uri', config.redirectUri);
@@ -303,10 +315,10 @@ async function exchangeAuthorizationCode(config: ProductionShopifyConfig, code: 
   return { accessToken: payload.access_token, scope: typeof payload.scope === 'string' ? payload.scope : null };
 }
 
-async function exchangeClientCredentials(config: ProductionShopifyConfig) {
+async function exchangeClientCredentials(config: ProductionShopifyConfig, storeDomain: string) {
   let response: Response;
   try {
-    response = await fetch(`https://${config.storeDomain}/admin/oauth/access_token`, {
+    response = await fetch(`https://${storeDomain}/admin/oauth/access_token`, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -352,7 +364,7 @@ export async function completeShopifyOAuth(request: Request) {
   } catch {
     throw new ProductionShopifyError('Shopify returned an invalid store domain.', 400, 'SHOPIFY_AUTH_INVALID');
   }
-  if (storeDomain !== state.storeDomain || storeDomain !== config.storeDomain) {
+  if (storeDomain !== state.storeDomain || (config.storeDomain !== null && storeDomain !== config.storeDomain)) {
     throw new ProductionShopifyError('The Shopify store does not match this GCS Books connection.', 400, 'SHOPIFY_AUTH_INVALID');
   }
   if (url.searchParams.get('error')) throw new ProductionShopifyError('Shopify authorization was cancelled. Start the import again when you are ready.', 400, 'SHOPIFY_AUTH_CANCELLED');
@@ -396,11 +408,13 @@ async function readStoredConnection(context: AuthenticatedShopifyRequest): Promi
   try {
     const token = decryptJson<{ accessToken?: unknown; expiresAt?: unknown }>(stored.access_token_ciphertext, context.config.tokenEncryptionSecret);
     if (typeof token.accessToken !== 'string' || !token.accessToken) throw new Error('Missing token');
+    const storedStoreDomain = normalizeStoreDomain(stored.store_domain);
+    if (context.storeDomain && storedStoreDomain !== context.storeDomain) return null;
     const expiresAt = typeof token.expiresAt === 'number' && Number.isFinite(token.expiresAt) ? token.expiresAt : null;
     if (context.config.connectionMode === 'client_credentials' && (expiresAt === null || expiresAt <= Date.now() + CLIENT_CREDENTIALS_REFRESH_BUFFER_MS)) {
       return null;
     }
-    return { storeDomain: normalizeStoreDomain(stored.store_domain), accessToken: token.accessToken, scope: stored.scope || null, expiresAt };
+    return { storeDomain: storedStoreDomain, accessToken: token.accessToken, scope: stored.scope || null, expiresAt };
   } catch {
     throw new ProductionShopifyError('Your saved Shopify connection cannot be opened. Reconnect Shopify to refresh it.', 409, 'SHOPIFY_REAUTH_REQUIRED');
   }
@@ -423,10 +437,11 @@ export async function resolveShopifyConnection(request: Request, context: Authen
   const saved = options.forceRefresh ? null : await readStoredConnection(context);
   if (saved) return saved;
   if (context.config.connectionMode === 'client_credentials') {
-    const token = await exchangeClientCredentials(context.config);
+    if (!context.storeDomain) throw new ProductionShopifyError('Choose your Shopify store before starting the import.', 400, 'SHOPIFY_STORE_REQUIRED');
+    const token = await exchangeClientCredentials(context.config, context.storeDomain);
     return saveConnection(context, {
       userId: context.userId,
-      storeDomain: context.config.storeDomain,
+      storeDomain: context.storeDomain,
       accessToken: token.accessToken,
       scope: token.scope,
       tokenExpiresAt: token.expiresAt,
@@ -441,7 +456,7 @@ export async function resolveShopifyConnection(request: Request, context: Authen
   } catch {
     throw new ProductionShopifyError('The Shopify approval session is invalid. Start the import again.', 409, 'SHOPIFY_AUTH_INVALID');
   }
-  if (pending.userId !== context.userId || pending.storeDomain !== context.config.storeDomain || pending.expiresAt < Date.now()) {
+  if (pending.userId !== context.userId || (context.storeDomain !== null && pending.storeDomain !== context.storeDomain) || pending.expiresAt < Date.now()) {
     throw new ProductionShopifyError('The Shopify approval session expired. Start the import again.', 409, 'SHOPIFY_AUTH_EXPIRED');
   }
   return saveConnection(context, pending);
