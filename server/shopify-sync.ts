@@ -352,7 +352,7 @@ export function normalizeShopifyStoreInput(value: string) {
 }
 
 function isAuthError(output: string) {
-  return /auth|token|login|credential|unauthori[sz]ed|not logged in|sign[ -]?in/i.test(output);
+  return /auth|token|login|credential|unauthori[sz]ed|not logged in|sign[ -]?in|access denied|permission/i.test(output);
 }
 
 function cliErrorMessage(output: string) {
