@@ -23,12 +23,29 @@ Open Shopify import center from the sidebar or the connected-data ribbon visible
 
 The import center now includes **Import from Shopify**. It asks only for the reporting period, then the Vite server runs Shopify CLI's authenticated Admin GraphQL queries for orders, product costs, Shopify Payments transactions, and payouts. The returned records are converted into the same source-aware import pipeline used by uploaded files, so they flow through the ledger, P&L, reports, analytics, and calendar.
 
-This bridge is intentionally server-side: no Admin token is sent to the browser. It is available while running the Vite development server. The request must come from a valid signed-in Supabase user; the server verifies that user before starting any Shopify command. Configure the local store domain once; the app handles CLI authorization on first use for that user:
+This bridge is intentionally server-side: no Admin token is sent to the browser. During local development, the request is handled by the Vite middleware and the CLI authorizes the current GCS Books user on first use. Configure the local store domain once:
 
 1. Copy `.env.example` to `.env.local` and set `SHOPIFY_STORE_DOMAIN=your-store.myshopify.com`.
 2. Start the app with `npm run dev`, sign in, open Shopify import center, click **Import from Shopify**, and choose **Last month**, **Last 3 months**, **Last 6 months**, **Last 1 year**, or **Lifetime**. If this user/store pair is not authorized yet, the button starts `shopify store auth`, opens Shopify’s approval page, and continues the import after approval. There is no separate pre-auth command.
 
 The first-use authorization requests `read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments`. Set `SHOPIFY_CLI_SCOPES` only if the store’s approved permissions need a deliberate override. The server keeps the active CLI session associated with the signed-in user and serializes user switches so one user’s import cannot run concurrently on another user’s CLI session. See the official [store auth](https://shopify.dev/docs/api/shopify-cli/store/store-auth) and [store execute](https://shopify.dev/docs/api/shopify-cli/store/store-execute) references.
+
+### Production Shopify connection
+
+Vercel cannot run a developer machine’s interactive Shopify CLI session. The deployed app therefore uses a server-side Shopify authorization-code flow at `/api/shopify/import`: the signed-in GCS Books user chooses a period, approves Shopify the first time, returns to GCS Books, and the selected import resumes automatically. Each GCS Books user gets a separate encrypted Shopify connection; no Shopify token is stored in browser storage.
+
+Create a Shopify standalone/API-only app, register `https://quickbook-gcs.vercel.app/api/shopify/oauth/callback` as an allowed redirect URL, and add these server-only variables to the Vercel Production environment before deploying:
+
+```ini
+SHOPIFY_STORE_DOMAIN=your-store.myshopify.com
+SHOPIFY_APP_CLIENT_ID=your-shopify-app-client-id
+SHOPIFY_APP_CLIENT_SECRET=your-shopify-app-client-secret
+SHOPIFY_APP_REDIRECT_URI=https://quickbook-gcs.vercel.app/api/shopify/oauth/callback
+SHOPIFY_TOKEN_ENCRYPTION_KEY=a-long-random-secret
+SHOPIFY_OAUTH_STATE_SECRET=a-different-long-random-secret
+```
+
+Never prefix these values with `VITE_` or `NEXT_PUBLIC_`. The client secret and Shopify access tokens stay in the Vercel function and the encrypted Supabase `finance_shopify_connections` table. Apply the latest migration before the first production import. The production flow uses Shopify’s authorization-code grant and sends the resulting access token only from the server in the `X-Shopify-Access-Token` header.
 
 The first four options use complete calendar months. Lifetime reads all data available to the authenticated CLI session; historical orders older than Shopify's default 60-day window require the `read_all_orders` permission. Product costs also require access to product costs in Shopify. If the store does not use Shopify Payments, the sync keeps orders and products and explains why payments or payouts are unavailable.
 

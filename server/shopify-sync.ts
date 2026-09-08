@@ -6,7 +6,7 @@ import type { Plugin } from 'vite';
 export type ShopifyImportPeriod = 'last_month' | 'last_3_months' | 'last_6_months' | 'last_1_year' | 'lifetime';
 
 type ShopifySyncEnv = Record<string, string | undefined>;
-type JsonRecord = Record<string, unknown>;
+export type JsonRecord = Record<string, unknown>;
 type MoneyValue = { amount?: string | number | null; currencyCode?: string | null } | null | undefined;
 type PageInfo = { hasNextPage?: boolean; endCursor?: string | null };
 
@@ -84,7 +84,7 @@ type ShopifyPayoutNode = {
   } | null;
 };
 
-type GraphQLResponse = {
+export type GraphQLResponse = {
   data?: JsonRecord | null;
   errors?: Array<{ message?: string | null }>;
 };
@@ -95,14 +95,14 @@ type ShopifyRange = {
   label: string;
 };
 
-type ShopifySyncFile = {
+export type ShopifySyncFile = {
   name: string;
   content: string;
   source: 'shopify_orders' | 'shopify_products' | 'shopify_payment_transactions' | 'payouts';
   rows: number;
 };
 
-type ShopifySyncPayload = {
+export type ShopifySyncPayload = {
   period: ShopifyImportPeriod;
   range: ShopifyRange;
   store: string;
@@ -275,7 +275,7 @@ function toCsv(headers: string[], rows: unknown[][]) {
   return [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n');
 }
 
-function normalizeStoreDomain(value: string) {
+export function normalizeStoreDomain(value: string) {
   const normalized = value.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
   if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(normalized)) {
     throw new Error('SHOPIFY_STORE_DOMAIN must be a valid store.myshopify.com domain.');
@@ -374,7 +374,7 @@ async function executeShopifyQuery(env: ShopifySyncEnv, store: string, query: st
   }
 }
 
-type ShopifyQueryExecutor = (query: string, variables: JsonRecord) => Promise<GraphQLResponse>;
+export type ShopifyQueryExecutor = (query: string, variables: JsonRecord) => Promise<GraphQLResponse>;
 
 let activeShopifyAuthorizationKey: string | null = null;
 let shopifyCliQueue = Promise.resolve();
@@ -485,8 +485,7 @@ function readJsonBody(request: IncomingMessage) {
   });
 }
 
-async function runShopifySyncUnlocked(env: ShopifySyncEnv, period: ShopifyImportPeriod, store: string, userId: string): Promise<ShopifySyncPayload> {
-  const executeQuery = createAuthenticatedShopifyExecutor(env, store, userId);
+export async function runShopifySyncWithExecutor(executeQuery: ShopifyQueryExecutor, period: ShopifyImportPeriod, store: string): Promise<ShopifySyncPayload> {
   const range = getShopifyRange(period);
   const warnings: string[] = [];
   const files: ShopifySyncFile[] = [];
@@ -523,6 +522,10 @@ async function runShopifySyncUnlocked(env: ShopifySyncEnv, period: ShopifyImport
 
   if (!files.length) throw new Error('Shopify returned no importable rows. Check the selected period, store authentication, and required CLI scopes.');
   return { period, range, store, importedAt: new Date().toISOString(), files, warnings };
+}
+
+async function runShopifySyncUnlocked(env: ShopifySyncEnv, period: ShopifyImportPeriod, store: string, userId: string): Promise<ShopifySyncPayload> {
+  return runShopifySyncWithExecutor(createAuthenticatedShopifyExecutor(env, store, userId), period, store);
 }
 
 async function runShopifySync(env: ShopifySyncEnv, period: ShopifyImportPeriod, userId: string): Promise<ShopifySyncPayload> {
