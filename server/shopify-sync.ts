@@ -120,6 +120,7 @@ class ShopifyRequestError extends Error {
 
 const API_VERSION_DEFAULT = '2026-07';
 const CLI_TIMEOUT_MS = 120_000;
+const CLI_DISCOVERY_TIMEOUT_MS = 20_000;
 const AUTH_TIMEOUT_MS = 300_000;
 const SHOPIFY_AUTH_SCOPES = 'read_orders,read_all_orders,read_products,read_inventory,read_shopify_payments';
 const MAX_PAGES = 1_000;
@@ -283,9 +284,14 @@ export function normalizeStoreDomain(value: string) {
   return normalized;
 }
 
-export function normalizeShopifyStoreInput(value: string) {
+type ParsedShopifyStoreInput = {
+  canonicalDomain: string | null;
+  adminHandle: string | null;
+};
+
+function parseShopifyStoreInput(value: string): ParsedShopifyStoreInput {
   const input = value.trim();
-  if (!input) throw new Error('Enter your Shopify admin page URL or store.myshopify.com domain.');
+  if (!input) throw new Error('Enter your canonical Shopify store domain, such as your-store.myshopify.com.');
   try {
     const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `https://${input}`;
     const url = new URL(candidate);
@@ -295,17 +301,23 @@ export function normalizeShopifyStoreInput(value: string) {
       const storeIndex = parts.findIndex((part) => part.toLowerCase() === 'store');
       const handle = storeIndex >= 0 ? decodeURIComponent(parts[storeIndex + 1] || '') : '';
       if (!/^[a-z0-9][a-z0-9-]*$/.test(handle)) throw new Error('Invalid Shopify admin URL.');
-      return normalizeStoreDomain(`${handle}.myshopify.com`);
+      return { canonicalDomain: null, adminHandle: handle.toLowerCase() };
     }
-    if (hostname.endsWith('.myshopify.com')) return normalizeStoreDomain(hostname);
+    if (hostname.endsWith('.myshopify.com')) return { canonicalDomain: normalizeStoreDomain(hostname), adminHandle: null };
   } catch {
     // Return one safe, actionable message for malformed or non-Shopify URLs.
   }
-  throw new Error('Enter a Shopify admin page URL such as https://admin.shopify.com/store/your-store or a store.myshopify.com domain.');
+  throw new Error('Enter the canonical Shopify store domain, such as https://your-store.myshopify.com/admin or your-store.myshopify.com.');
+}
+
+export function normalizeShopifyStoreInput(value: string) {
+  const parsed = parseShopifyStoreInput(value);
+  if (parsed.canonicalDomain) return parsed.canonicalDomain;
+  throw new Error('Shopify admin URLs can use an alias that is not the API domain. Paste the canonical store.myshopify.com domain from Shopify Settings > Domains.');
 }
 
 function isAuthError(output: string) {
-  return /auth|token|login|credential|access denied|unauthori[sz]ed|permission/i.test(output);
+  return /auth|token|login|credential|unauthori[sz]ed|not logged in|sign[ -]?in/i.test(output);
 }
 
 function cliErrorMessage(output: string) {
@@ -392,6 +404,43 @@ export async function listAuthenticatedShopifyStores(env: ShopifySyncEnv) {
   }))].sort();
 }
 
+async function resolveCliAdminHandle(env: ShopifySyncEnv, handle: string) {
+  let stores: string[];
+  try {
+    stores = await listAuthenticatedShopifyStores(env);
+  } catch {
+    return null;
+  }
+  const directMatch = stores.find((store) => store.split('.')[0] === handle);
+  if (directMatch) return directMatch;
+  for (const store of stores) {
+    try {
+      const result = await runCli(env, ['store', 'info', '--store', store, '--json'], CLI_DISCOVERY_TIMEOUT_MS);
+      const payload = parseCliJson(result.stdout) as JsonRecord;
+      const adminUrl = typeof payload.adminUrl === 'string' ? payload.adminUrl : '';
+      if (!adminUrl) continue;
+      const metadata = parseShopifyStoreInput(adminUrl);
+      if (metadata.adminHandle === handle) return store;
+    } catch {
+      // An unavailable store must not prevent another authenticated store from resolving.
+    }
+  }
+  return null;
+}
+
+async function resolveShopifyStoreInput(env: ShopifySyncEnv, value: string) {
+  let parsed: ParsedShopifyStoreInput;
+  try {
+    parsed = parseShopifyStoreInput(value);
+  } catch (error) {
+    throw new ShopifyRequestError(400, error instanceof Error ? error.message : 'Enter a valid Shopify store domain.');
+  }
+  if (parsed.canonicalDomain) return parsed.canonicalDomain;
+  const resolved = parsed.adminHandle ? await resolveCliAdminHandle(env, parsed.adminHandle) : null;
+  if (resolved) return resolved;
+  throw new ShopifyRequestError(400, 'That Shopify admin URL uses an alias. Paste the canonical store.myshopify.com domain from Shopify Settings > Domains so GCS Books can link the correct store automatically.');
+}
+
 async function authenticateShopifyStore(env: ShopifySyncEnv, store: string) {
   const args = ['store', 'auth', '--store', store, '--scopes', env.SHOPIFY_CLI_SCOPES?.trim() || SHOPIFY_AUTH_SCOPES, '--no-color', '--json'];
   try {
@@ -422,18 +471,15 @@ async function executeShopifyQuery(env: ShopifySyncEnv, store: string, query: st
 
 export type ShopifyQueryExecutor = (query: string, variables: JsonRecord) => Promise<GraphQLResponse>;
 
-let activeShopifyAuthorizationKey: string | null = null;
 let shopifyCliQueue = Promise.resolve();
 
-function createAuthenticatedShopifyExecutor(env: ShopifySyncEnv, store: string, userId: string): ShopifyQueryExecutor {
-  const authorizationKey = `${userId}:${store}`;
+function createAuthenticatedShopifyExecutor(env: ShopifySyncEnv, store: string): ShopifyQueryExecutor {
   return async (query, variables) => {
     try {
       return await executeShopifyQuery(env, store, query, variables);
     } catch (error) {
       if (!(error instanceof ShopifyCliError) || !error.requiresAuth) throw error;
       await authenticateShopifyStore(env, store);
-      activeShopifyAuthorizationKey = authorizationKey;
       return executeShopifyQuery(env, store, query, variables);
     }
   };
@@ -570,23 +616,18 @@ export async function runShopifySyncWithExecutor(executeQuery: ShopifyQueryExecu
   return { period, range, store, importedAt: new Date().toISOString(), files, warnings };
 }
 
-async function runShopifySyncUnlocked(env: ShopifySyncEnv, period: ShopifyImportPeriod, store: string, userId: string): Promise<ShopifySyncPayload> {
-  return runShopifySyncWithExecutor(createAuthenticatedShopifyExecutor(env, store, userId), period, store);
+async function runShopifySyncUnlocked(env: ShopifySyncEnv, period: ShopifyImportPeriod, store: string): Promise<ShopifySyncPayload> {
+  return runShopifySyncWithExecutor(createAuthenticatedShopifyExecutor(env, store), period, store);
 }
 
-async function runShopifySync(env: ShopifySyncEnv, period: ShopifyImportPeriod, userId: string, storeOverride?: string): Promise<ShopifySyncPayload> {
-  const store = normalizeShopifyStoreInput(storeOverride || env.SHOPIFY_STORE_DOMAIN || '');
-  const authorizationKey = `${userId}:${store}`;
+async function runShopifySync(env: ShopifySyncEnv, period: ShopifyImportPeriod, storeOverride?: string): Promise<ShopifySyncPayload> {
+  const store = await resolveShopifyStoreInput(env, storeOverride || env.SHOPIFY_STORE_DOMAIN || '');
   const previous = shopifyCliQueue;
   let release!: () => void;
   shopifyCliQueue = new Promise<void>((resolve) => { release = resolve; });
   await previous;
   try {
-    if (activeShopifyAuthorizationKey !== authorizationKey) {
-      await authenticateShopifyStore(env, store);
-      activeShopifyAuthorizationKey = authorizationKey;
-    }
-    return await runShopifySyncUnlocked(env, period, store, userId);
+    return await runShopifySyncUnlocked(env, period, store);
   } finally {
     release();
   }
@@ -648,7 +689,7 @@ export function createShopifySyncPlugin(env: ShopifySyncEnv): Plugin {
             return;
           }
           const storeInput = body.shopifyPageUrl?.trim() || body.storeDomain?.trim() || undefined;
-          const result = await runShopifySync(env, body.period as ShopifyImportPeriod, userId, storeInput);
+          const result = await runShopifySync(env, body.period as ShopifyImportPeriod, storeInput);
           jsonResponse(response, 200, result as unknown as JsonRecord);
         } catch (error) {
           const status = error instanceof ShopifyRequestError ? error.statusCode : 502;

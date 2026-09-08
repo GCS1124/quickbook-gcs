@@ -178,7 +178,7 @@ export async function requireAuthenticatedShopifyRequest(request: Request, store
     try {
       storeDomain = normalizeShopifyStoreInput(storeInput);
     } catch {
-      throw new ProductionShopifyError('Enter a Shopify admin page URL or a valid store.myshopify.com domain.', 400, 'SHOPIFY_STORE_INVALID');
+      throw new ProductionShopifyError('Paste the canonical store.myshopify.com domain from Shopify Settings > Domains. Shopify admin URL aliases are not always the API domain.', 400, 'SHOPIFY_STORE_INVALID');
     }
     if (config.connectionMode === 'client_credentials' && !config.allowedStoreDomains.includes(storeDomain)) {
       throw new ProductionShopifyError('That Shopify store is not enabled for this native server connection.', 403, 'SHOPIFY_STORE_NOT_ALLOWED');
